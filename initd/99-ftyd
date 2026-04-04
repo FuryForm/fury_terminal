@@ -1,0 +1,21 @@
+#!/system/bin/sh
+# FuryTerminal daemon init.d startup script
+# Place in /system/etc/init.d/ (requires busybox init.d support)
+
+DAEMON="/system/bin/ftyd"
+PIDFILE="/data/local/tmp/ftyd.pid"
+
+# Wait for system to be ready
+sleep 10
+
+# Kill existing
+if [ -f "$PIDFILE" ]; then
+    kill $(cat "$PIDFILE") 2>/dev/null
+    rm -f "$PIDFILE"
+fi
+
+# Start if binary exists (abstract socket bypasses filesystem/SELinux permissions)
+if [ -x "$DAEMON" ]; then
+    $DAEMON -s @ftyd -p "$PIDFILE"
+    log -t ftyd "Daemon started via init.d on abstract socket @ftyd"
+fi

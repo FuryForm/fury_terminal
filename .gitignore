@@ -1,0 +1,26 @@
+# Build outputs
+libs/
+*.o
+*.obj
+
+# Android build artifacts
+android/.gradle/
+android/build/
+android/*/build/
+android/*/.cxx/
+android/local.properties
+android/captures/
+
+# IDE
+android/.idea/
+*.iml
+
+# JNI prebuilt (CMake externalNativeBuild compiles libterm.so during Gradle build)
+android/terminal-lib/src/main/jniLibs/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Icarus
+.icarus/
