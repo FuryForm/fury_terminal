@@ -38,12 +38,15 @@ android {
         jvmTarget = "1.8"
     }
 
-    externalNativeBuild {
-        cmake {
-            path = file("../../native/CMakeLists.txt")
-            version = "3.18.1+"
-        }
-    }
+    // Native .so files are prebuilt and committed in src/main/jniLibs/
+    // Build with: ./build.sh (Linux/macOS) or .\build.ps1 (Windows)
+    // For local development with CMake auto-compilation, uncomment:
+    // externalNativeBuild {
+    //     cmake {
+    //         path = file("../../native/CMakeLists.txt")
+    //         version = "3.18.1+"
+    //     }
+    // }
 }
 
 dependencies {

@@ -2,11 +2,7 @@ jdk:
   - openjdk17
 
 before_install:
-  - yes | $ANDROID_HOME/tools/bin/sdkmanager --licenses
-  - $ANDROID_HOME/tools/bin/sdkmanager "platforms;android-34"
-  - $ANDROID_HOME/tools/bin/sdkmanager "build-tools;34.0.0"
-  - $ANDROID_HOME/tools/bin/sdkmanager --install "ndk;27.0.12077973"
-  - $ANDROID_HOME/tools/bin/sdkmanager --install "cmake;3.22.1"
+  - chmod +x android/gradlew
 
 install:
   - cd android && ./gradlew :terminal-lib:publishToMavenLocal

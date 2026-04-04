@@ -15,8 +15,9 @@ android/captures/
 android/.idea/
 *.iml
 
-# JNI prebuilt (CMake externalNativeBuild compiles libterm.so during Gradle build)
-android/terminal-lib/src/main/jniLibs/
+# JNI prebuilt .so files are committed for JitPack publishing
+# (JitPack can't reliably run CMake/NDK builds)
+# Rebuild with build.sh/build.ps1 to update
 
 # OS
 .DS_Store
