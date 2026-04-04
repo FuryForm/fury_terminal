@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: temurin
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Make gradlew executable
+        run: chmod +x android/gradlew
+
+      - name: Build library
+        working-directory: android
+        run: ./gradlew :terminal-lib:assembleRelease
+
+      - name: Run unit tests
+        working-directory: android
+        run: ./gradlew :sample-app:testDebugUnitTest
+
+      - name: Lint
+        working-directory: android
+        run: ./gradlew :terminal-lib:lintRelease
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: android/sample-app/build/reports/tests/
