@@ -40,11 +40,28 @@ internal object NativePTY {
     external fun nativeSendSignal(id: Int, signum: Int)
 
     /**
-     * Connect to a ftyd daemon via Unix socket and start a session.
+     * Connect to a ftyd daemon via Unix socket and start an interactive session.
      * The daemon spawns the shell as its own user (typically root).
      *
      * @param socketPath path to the daemon socket. Prefix with '@' for abstract socket.
      * @return session ID >= 0, or -1 on failure (daemon not running or refused connection).
      */
     external fun nativeStartDaemonSession(socketPath: String, rows: Int, cols: Int): Int
+
+    /**
+     * Connect to a ftyd daemon and execute a single command.
+     * The daemon runs the command via pipes (no PTY) and streams output back.
+     * When the command finishes, the daemon sends the exit code and closes.
+     *
+     * @param socketPath path to the daemon socket. Prefix with '@' for abstract socket.
+     * @param command the shell command to execute (passed to sh -c).
+     * @return session ID >= 0, or -1 on failure.
+     */
+    external fun nativeStartExecSession(socketPath: String, command: String): Int
+
+    /**
+     * Get the exit code from a completed exec session.
+     * Returns -1 if the session hasn't finished or exit code wasn't received.
+     */
+    external fun nativeGetExitCode(id: Int): Int
 }

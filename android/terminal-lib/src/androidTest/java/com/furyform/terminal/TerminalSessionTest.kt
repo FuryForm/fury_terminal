@@ -418,4 +418,174 @@ class TerminalSessionTest {
         session.close()
         assertTrue(session.isClosed)
     }
+
+    // =================== Exec Mode ===================
+
+    @Test
+    fun testExecSimpleCommand() {
+        val result = try {
+            TerminalSession.exec("echo hello", "@ftyd")
+        } catch (_: IllegalStateException) {
+            return // Daemon not running
+        }
+
+        assertTrue(
+            "Output should contain 'hello', got: ${result.output.take(200)}",
+            result.output.contains("hello")
+        )
+        assertEquals("Exit code should be 0", 0, result.exitCode)
+        assertTrue("isSuccess should be true", result.isSuccess)
+    }
+
+    @Test
+    fun testExecExitCode() {
+        val result = try {
+            TerminalSession.exec("exit 42", "@ftyd")
+        } catch (_: IllegalStateException) {
+            return // Daemon not running
+        }
+
+        assertEquals("Exit code should be 42", 42, result.exitCode)
+        assertFalse("isSuccess should be false for exit code 42", result.isSuccess)
+    }
+
+    @Test
+    fun testExecCommandNotFound() {
+        val result = try {
+            TerminalSession.exec("nonexistent_command_xyz", "@ftyd")
+        } catch (_: IllegalStateException) {
+            return // Daemon not running
+        }
+
+        assertEquals("Exit code should be 127 for command not found", 127, result.exitCode)
+    }
+
+    @Test
+    fun testExecMultilineOutput() {
+        val result = try {
+            TerminalSession.exec("echo line1; echo line2; echo line3", "@ftyd")
+        } catch (_: IllegalStateException) {
+            return // Daemon not running
+        }
+
+        assertTrue(
+            "Output should contain 'line1', got: ${result.output.take(200)}",
+            result.output.contains("line1")
+        )
+        assertTrue(
+            "Output should contain 'line2', got: ${result.output.take(200)}",
+            result.output.contains("line2")
+        )
+        assertTrue(
+            "Output should contain 'line3', got: ${result.output.take(200)}",
+            result.output.contains("line3")
+        )
+    }
+
+    @Test
+    fun testExecNoEcho() {
+        val result = try {
+            TerminalSession.exec("echo test123", "@ftyd")
+        } catch (_: IllegalStateException) {
+            return // Daemon not running
+        }
+
+        assertTrue(
+            "Output should contain 'test123', got: ${result.output.take(200)}",
+            result.output.contains("test123")
+        )
+        assertFalse(
+            "Output should NOT contain the command text 'echo test123', got: ${result.output.take(200)}",
+            result.output.contains("echo test123")
+        )
+    }
+
+    @Test
+    fun testExecSessionStreaming() {
+        val session = try {
+            TerminalSession.execSession("echo a; echo b; echo c", "@ftyd")
+        } catch (_: IllegalStateException) {
+            return // Daemon not running
+        }
+
+        session.use {
+            val output = StringBuilder()
+            while (true) {
+                val chunk = readWithTimeout(it, 3000) ?: break
+                output.append(String(chunk, Charsets.UTF_8))
+            }
+            val fullOutput = output.toString()
+
+            assertTrue(
+                "Streaming output should contain 'a', got: ${fullOutput.take(200)}",
+                fullOutput.contains("a")
+            )
+            assertTrue(
+                "Streaming output should contain 'b', got: ${fullOutput.take(200)}",
+                fullOutput.contains("b")
+            )
+            assertTrue(
+                "Streaming output should contain 'c', got: ${fullOutput.take(200)}",
+                fullOutput.contains("c")
+            )
+            assertEquals("Exit code should be 0 after EOF", 0, it.exitCode)
+        }
+    }
+
+    @Test
+    fun testExecLargeOutput() {
+        val result = try {
+            TerminalSession.exec("seq 1 1000", "@ftyd")
+        } catch (_: IllegalStateException) {
+            return // Daemon not running
+        }
+
+        assertTrue(
+            "Output should contain '1', got: ${result.output.take(200)}",
+            result.output.contains("1")
+        )
+        assertTrue(
+            "Output should contain '1000', got: ${result.output.takeLast(200)}",
+            result.output.contains("1000")
+        )
+        assertEquals("Exit code should be 0", 0, result.exitCode)
+    }
+
+    @Test
+    fun testExecStderrCaptured() {
+        val result = try {
+            TerminalSession.exec("echo err >&2", "@ftyd")
+        } catch (_: IllegalStateException) {
+            return // Daemon not running
+        }
+
+        assertTrue(
+            "Output should contain 'err' (stderr merged with stdout), got: ${result.output.take(200)}",
+            result.output.contains("err")
+        )
+    }
+
+    @Test
+    fun testExecPipeSupport() {
+        val result = try {
+            TerminalSession.exec("echo hello world | tr ' ' '\n'", "@ftyd")
+        } catch (_: IllegalStateException) {
+            return // Daemon not running
+        }
+
+        assertTrue(
+            "Output should contain 'hello', got: ${result.output.take(200)}",
+            result.output.contains("hello")
+        )
+        assertTrue(
+            "Output should contain 'world', got: ${result.output.take(200)}",
+            result.output.contains("world")
+        )
+        // Verify they appear on separate lines
+        val lines = result.output.lines().map { it.trim() }.filter { it.isNotEmpty() }
+        assertTrue(
+            "Output should have 'hello' and 'world' on separate lines, got: ${result.output.take(200)}",
+            lines.any { it == "hello" } && lines.any { it == "world" }
+        )
+    }
 }

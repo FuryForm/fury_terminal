@@ -4,13 +4,19 @@
  * Listens on a Unix socket and spawns a root shell for each connecting client.
  * Protocol matches the client in libterm.c:
  *   Message format: [type:uint8][length:uint32 BE][data:length]
- *   Types: DATA=0x01, RESIZE=0x02, SIGNAL=0x03, CLOSE=0x04
+ *   Types: DATA=0x01, RESIZE=0x02, SIGNAL=0x03, CLOSE=0x04,
+ *          EXEC=0x05, EXIT_CODE=0x06
  *
- * Client flow:
+ * Client flow (interactive):
  *   1. Connect to socket
  *   2. Send RESIZE (4 bytes: rows BE16 + cols BE16) — daemon spawns shell
  *   3. Exchange DATA messages
  *   4. Send CLOSE or disconnect to terminate
+ *
+ * Client flow (exec):
+ *   1. Connect to socket
+ *   2. Send EXEC (payload = command string) — daemon runs sh -c via pipes
+ *   3. Receive DATA (stdout+stderr), then EXIT_CODE, then CLOSE
  *
  * Build: Android NDK clang, dynamic linking (liblog.so always available).
  *   aarch64-linux-android21-clang -o ftyd ftyd.c -llog
@@ -47,7 +53,80 @@
 #define LOGE(...) fprintf(stderr, __VA_ARGS__)
 #endif
 
+/* =================== EXEC PID TABLE =================== */
+
+/**
+ * Track PIDs of exec'd children so reap_children() can save their exit
+ * status instead of discarding it.  The SIGCHLD handler runs in any
+ * thread that hasn't blocked the signal — which means it races with
+ * handle_exec()'s waitpid().  This table breaks the race:
+ *   1. handle_exec registers the PID immediately after fork()
+ *   2. reap_children finds the PID here and stores the wait status
+ *   3. handle_exec polls until ready==1, then reads the status
+ *
+ * Lock-free from the handler side (atomic ready flag).
+ * CAS-protected for register (thread-safe without mutex).
+ */
+#define MAX_EXEC_PIDS 32
+
+static struct {
+    struct {
+        pid_t pid;   /* 0 = slot free; accessed via __atomic_* */
+        int   status; /* accessed via __atomic_* */
+        int   ready; /* 1 = reaped by handler; accessed via __atomic_* */
+    } entries[MAX_EXEC_PIDS];
+} exec_table;
+
+/* Called right after fork() in handle_exec, before child can exit.
+ * Uses CAS to avoid two threads claiming the same slot.
+ * Returns slot index, or -1 if table full. */
+static int exec_table_register(pid_t pid) {
+    for (int i = 0; i < MAX_EXEC_PIDS; i++) {
+        pid_t expected = 0;
+        /* Pre-initialize status/ready BEFORE publishing PID.
+         * Since pid==0 means "free slot", the handler ignores this slot
+         * until the CAS below publishes the PID.  We must ensure status
+         * and ready are visible before the PID becomes visible. */
+        if (__atomic_load_n(&exec_table.entries[i].pid, __ATOMIC_ACQUIRE) == 0) {
+            __atomic_store_n(&exec_table.entries[i].status, 0, __ATOMIC_RELAXED);
+            __atomic_store_n(&exec_table.entries[i].ready, 0, __ATOMIC_RELAXED);
+            /* Release fence ensures status/ready are visible before PID */
+            expected = 0;
+            if (__atomic_compare_exchange_n(&exec_table.entries[i].pid, &expected, pid,
+                                            0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+                return i;
+            }
+        }
+    }
+    return -1;
+}
+
+/* Called by handle_exec after pipe EOF.  Spins briefly — the child is
+ * already dead so the handler fires within microseconds.
+ * Times out after 5 seconds as a safety net, falling back to waitpid. */
+static int exec_table_wait(int slot, pid_t pid, int *status) {
+    int waited = 0;
+    while (!__atomic_load_n(&exec_table.entries[slot].ready, __ATOMIC_ACQUIRE)) {
+        usleep(1000); /* 1ms — child is already dead, won't spin long */
+        if (++waited > 5000) { /* 5 second timeout */
+            LOGE("exec_table_wait: timeout waiting for PID %d, falling back to waitpid\n", pid);
+            __atomic_store_n(&exec_table.entries[slot].pid, 0, __ATOMIC_RELEASE);
+            /* Try direct waitpid as fallback */
+            if (waitpid(pid, status, 0) == pid) return 0;
+            *status = 0;
+            return -1;
+        }
+    }
+    *status = __atomic_load_n(&exec_table.entries[slot].status, __ATOMIC_ACQUIRE);
+    __atomic_store_n(&exec_table.entries[slot].pid, 0, __ATOMIC_RELEASE); /* free slot */
+    return 0;
+}
+
 /* =================== CLIENT SESSION =================== */
+
+/* Forward declaration for exec handler */
+static void handle_exec(int client_fd, const char *shell_path,
+                        const uint8_t *cmd_buf, uint32_t cmd_len);
 
 typedef struct {
     int client_fd;     /* socket to the app */
@@ -79,7 +158,7 @@ static void *pty_reader_thread(void *arg) {
 
 /**
  * Handle a single client connection.
- * Called from the accept loop (or a thread).
+ * Called from a per-client thread.
  *
  * Protocol:
  *   1. Wait for RESIZE message (contains initial rows/cols)
@@ -101,7 +180,12 @@ static void handle_client(int client_fd, const char *shell_path) {
     }
 
     if (msg_type != FTYD_RESIZE || msg_len < 4) {
-        LOGE("Client fd=%d: expected RESIZE as first message, got type=%d len=%u\n",
+        if (msg_type == FTYD_EXEC && msg_len > 0) {
+            /* EXEC mode: run command via pipes, not interactive shell */
+            handle_exec(client_fd, shell_path, msg_buf, msg_len);
+            return;
+        }
+        LOGE("Client fd=%d: expected RESIZE or EXEC as first message, got type=%d len=%u\n",
              client_fd, msg_type, msg_len);
         proto_send(client_fd, FTYD_CLOSE, NULL, 0);
         close(client_fd);
@@ -246,7 +330,248 @@ cleanup:
     free(session);
 }
 
-/* Thread wrapper for handle_client */
+/**
+ * Context for the exec client-reader thread.
+ * Reads SIGNAL/CLOSE messages from the client while handle_exec()
+ * reads stdout from the child process.
+ */
+typedef struct {
+    int client_fd;
+    pid_t child_pid;
+    _Atomic int running; /* 1 while main thread is still in stdout loop */
+} exec_client_reader_ctx;
+
+/**
+ * Thread: reads protocol messages from client_fd during exec.
+ * Handles SIGNAL (forwarded to child) and CLOSE (kills child).
+ * Exits when client disconnects, CLOSE received, or running flag cleared.
+ */
+static void *exec_client_reader_thread(void *arg) {
+    exec_client_reader_ctx *ctx = (exec_client_reader_ctx *)arg;
+    uint8_t msg_type;
+    uint8_t msg_buf[64]; /* only need small buffer for SIGNAL (1 byte) */
+    uint32_t msg_len;
+
+    while (atomic_load(&ctx->running)) {
+        if (proto_recv(ctx->client_fd, &msg_type, msg_buf, sizeof(msg_buf), &msg_len) < 0) {
+            /* Client disconnected or read error */
+            break;
+        }
+
+        switch (msg_type) {
+        case FTYD_SIGNAL:
+            if (msg_len >= 1) {
+                int sig = (int)msg_buf[0];
+                if (ftyd_signal_allowed(sig)) {
+                    LOGD("EXEC client fd=%d: sending signal %d to pid %d\n",
+                         ctx->client_fd, sig, ctx->child_pid);
+                    kill(ctx->child_pid, sig);
+                } else {
+                    LOGD("EXEC client fd=%d: rejected signal %d\n",
+                         ctx->client_fd, sig);
+                }
+            }
+            break;
+
+        case FTYD_CLOSE:
+            LOGD("EXEC client fd=%d: CLOSE received, killing child %d\n",
+                 ctx->client_fd, ctx->child_pid);
+            kill(ctx->child_pid, SIGTERM);
+            usleep(50000);
+            kill(ctx->child_pid, SIGKILL);
+            goto done;
+
+        default:
+            LOGD("EXEC client fd=%d: ignoring message type %d\n",
+                 ctx->client_fd, msg_type);
+            break;
+        }
+    }
+
+done:
+    return NULL;
+}
+
+/**
+ * Handle EXEC mode: fork a command via pipes (no PTY), stream stdout+stderr
+ * as DATA messages, send EXIT_CODE when process exits, then CLOSE.
+ *
+ * No echo, no prompt, no line discipline — clean command output.
+ */
+static void handle_exec(int client_fd, const char *shell_path,
+                        const uint8_t *cmd_buf, uint32_t cmd_len) {
+    /* Null-terminate the command string */
+    char *command = (char *)malloc(cmd_len + 1);
+    if (!command) {
+        LOGE("Client fd=%d: malloc failed for exec command\n", client_fd);
+        proto_send(client_fd, FTYD_CLOSE, NULL, 0);
+        close(client_fd);
+        return;
+    }
+    memcpy(command, cmd_buf, cmd_len);
+    command[cmd_len] = '\0';
+
+    LOGI("Client fd=%d: EXEC '%s'\n", client_fd, command);
+
+    /* Create pipes: stdout_pipe for stdout+stderr, stdin_pipe for stdin */
+    int stdout_pipe[2]; /* [0]=read, [1]=write */
+    int stdin_pipe[2];  /* [0]=read, [1]=write */
+
+    if (pipe(stdout_pipe) < 0) {
+        LOGE("Client fd=%d: pipe(stdout) failed: %s\n", client_fd, strerror(errno));
+        free(command);
+        proto_send(client_fd, FTYD_CLOSE, NULL, 0);
+        close(client_fd);
+        return;
+    }
+    if (pipe(stdin_pipe) < 0) {
+        LOGE("Client fd=%d: pipe(stdin) failed: %s\n", client_fd, strerror(errno));
+        free(command);
+        close(stdout_pipe[0]); close(stdout_pipe[1]);
+        proto_send(client_fd, FTYD_CLOSE, NULL, 0);
+        close(client_fd);
+        return;
+    }
+
+    /* Block SIGCHLD around fork+register to prevent the handler from
+     * reaping the child before we register its PID in the exec table. */
+    sigset_t chld_set, old_set;
+    sigemptyset(&chld_set);
+    sigaddset(&chld_set, SIGCHLD);
+    pthread_sigmask(SIG_BLOCK, &chld_set, &old_set);
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        LOGE("Client fd=%d: fork() failed: %s\n", client_fd, strerror(errno));
+        pthread_sigmask(SIG_SETMASK, &old_set, NULL);
+        free(command);
+        close(stdout_pipe[0]); close(stdout_pipe[1]);
+        close(stdin_pipe[0]); close(stdin_pipe[1]);
+        proto_send(client_fd, FTYD_CLOSE, NULL, 0);
+        close(client_fd);
+        return;
+    }
+
+    if (pid == 0) {
+        /* Child: wire up pipes and exec */
+        close(stdout_pipe[0]); /* parent reads this end */
+        close(stdin_pipe[1]);  /* parent writes this end */
+
+        dup2(stdin_pipe[0], 0);   /* stdin from pipe */
+        dup2(stdout_pipe[1], 1);  /* stdout to pipe */
+        dup2(stdout_pipe[1], 2);  /* stderr to same pipe */
+        close(stdin_pipe[0]);
+        close(stdout_pipe[1]);
+
+        /* Close all FDs > 2 */
+        int maxfd = (int)sysconf(_SC_OPEN_MAX);
+        if (maxfd < 0) maxfd = 256;
+        for (int fd = 3; fd < maxfd; fd++) close(fd);
+
+        /* Set environment */
+        setenv("PATH", "/product/bin:/sbin:/vendor/bin:/system/sbin:/system/bin:/system/xbin:/system/bin/applets", 1);
+        setenv("HOME", "/data/local/tmp", 0);
+
+        /* Use sh -c to support pipes, redirects, etc. */
+        execl(shell_path, shell_path, "-c", command, (char *)NULL);
+        _exit(127);
+    }
+
+    /* Parent: register PID in exec table BEFORE the child can exit,
+     * so reap_children() saves its status instead of discarding it.
+     * SIGCHLD is blocked here — unblock after registration. */
+    int exec_slot = exec_table_register(pid);
+    pthread_sigmask(SIG_SETMASK, &old_set, NULL);
+
+    free(command);
+    close(stdout_pipe[1]); /* we read from stdout_pipe[0] */
+    close(stdin_pipe[0]);  /* we write to stdin_pipe[1] */
+
+    /* Spawn client-reader thread to handle SIGNAL/CLOSE from client
+     * while we read stdout from the child process. */
+    exec_client_reader_ctx reader_ctx;
+    reader_ctx.client_fd = client_fd;
+    reader_ctx.child_pid = pid;
+    atomic_store(&reader_ctx.running, 1);
+
+    pthread_t reader_tid;
+    int reader_started = 0;
+    if (pthread_create(&reader_tid, NULL, exec_client_reader_thread, &reader_ctx) == 0) {
+        reader_started = 1;
+    } else {
+        LOGE("Client fd=%d: failed to create exec client reader thread\n", client_fd);
+    }
+
+    /* Read stdout in this thread, relay to client */
+    uint8_t buf[BUF_SIZE];
+    ssize_t n;
+    while ((n = read(stdout_pipe[0], buf, sizeof(buf))) > 0) {
+        if (proto_send(client_fd, FTYD_DATA, buf, (uint32_t)n) < 0) {
+            /* Client disconnected — kill the child to avoid leaking processes */
+            kill(pid, SIGTERM);
+            usleep(50000);
+            kill(pid, SIGKILL);
+            break;
+        }
+    }
+
+    /* stdout EOF — child's stdout closed (process exiting or exited) */
+    close(stdout_pipe[0]);
+    close(stdin_pipe[1]); /* close stdin to child in case it's still running */
+
+    /* Stop the client reader thread.  Shutting down client_fd's read side
+     * unblocks proto_recv in the reader thread. */
+    atomic_store(&reader_ctx.running, 0);
+    shutdown(client_fd, SHUT_RD);
+    if (reader_started) {
+        pthread_join(reader_tid, NULL);
+    }
+
+    /* Get exit code — either from exec table (if handler reaped) or waitpid */
+    int status = 0;
+    int exit_code;
+    if (exec_slot >= 0) {
+        /* Wait for reap_children() to store the status.  The child is
+         * already dead (pipe EOF), so this returns almost immediately. */
+        exec_table_wait(exec_slot, pid, &status);
+        if (WIFEXITED(status)) {
+            exit_code = WEXITSTATUS(status);
+        } else if (WIFSIGNALED(status)) {
+            exit_code = 128 + WTERMSIG(status);
+        } else {
+            exit_code = -1;
+        }
+    } else {
+        /* Table full — fallback to direct waitpid (racy but unlikely) */
+        int wait_ret = waitpid(pid, &status, 0);
+        if (wait_ret == pid) {
+            if (WIFEXITED(status)) {
+                exit_code = WEXITSTATUS(status);
+            } else if (WIFSIGNALED(status)) {
+                exit_code = 128 + WTERMSIG(status);
+            } else {
+                exit_code = -1;
+            }
+        } else {
+            exit_code = -1;
+        }
+    }
+
+    LOGI("Client fd=%d: EXEC finished (exit_code=%d)\n", client_fd, exit_code);
+
+    /* Send EXIT_CODE message: 4-byte int32 BE */
+    uint8_t ec[4];
+    ec[0] = (uint8_t)((uint32_t)exit_code >> 24);
+    ec[1] = (uint8_t)((uint32_t)exit_code >> 16);
+    ec[2] = (uint8_t)((uint32_t)exit_code >> 8);
+    ec[3] = (uint8_t)((uint32_t)exit_code);
+    proto_send(client_fd, FTYD_EXIT_CODE, ec, 4);
+
+    /* Send CLOSE */
+    proto_send(client_fd, FTYD_CLOSE, NULL, 0);
+    close(client_fd);
+}
+
 typedef struct {
     int client_fd;
     char shell_path[256];
@@ -359,7 +684,22 @@ static int create_listen_socket(const char *socket_path) {
 
 static void reap_children(int sig) {
     (void)sig;
-    while (waitpid(-1, NULL, WNOHANG) > 0) { /* reap all */ }
+    int   status;
+    pid_t pid;
+
+    while ((pid = waitpid(-1, &status, WNOHANG)) > 0) {
+        /* Check if this is a tracked exec PID — save its status instead
+         * of discarding it.  Lock-free: only atomic reads/writes. */
+        for (int i = 0; i < MAX_EXEC_PIDS; i++) {
+            if (__atomic_load_n(&exec_table.entries[i].pid, __ATOMIC_ACQUIRE) == pid) {
+                __atomic_store_n(&exec_table.entries[i].status, status, __ATOMIC_RELAXED);
+                __atomic_store_n(&exec_table.entries[i].ready, 1, __ATOMIC_RELEASE);
+                break;
+            }
+        }
+        /* If not an exec PID, it's an interactive session child — already
+         * reaped, nothing more to do (same as before). */
+    }
 }
 
 /* =================== MAIN =================== */

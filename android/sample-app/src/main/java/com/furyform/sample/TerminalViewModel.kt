@@ -26,8 +26,17 @@ class TerminalViewModel : ViewModel() {
     private val _isRunning = MutableStateFlow(false)
     val isRunning: StateFlow<Boolean> = _isRunning.asStateFlow()
 
+    private val _execOutput = MutableStateFlow("")
+    val execOutput: StateFlow<String> = _execOutput.asStateFlow()
+
+    private val _isExecRunning = MutableStateFlow(false)
+    val isExecRunning: StateFlow<Boolean> = _isExecRunning.asStateFlow()
+
     private var session: TerminalSession? = null
     private var readJob: Job? = null
+
+    private var execSession: TerminalSession? = null
+    private var execJob: Job? = null
 
     fun startTerminal(rows: Int = 24, cols: Int = 80, daemonSocketPath: String? = null) {
         if (_isRunning.value) return  // prevent double-start
@@ -103,6 +112,84 @@ class TerminalViewModel : ViewModel() {
         _terminalOutput.update { "" }
     }
 
+    fun execCommand(command: String, socketPath: String = "@ftyd") {
+        execJob = viewModelScope.launch(Dispatchers.IO) {
+            _isExecRunning.value = true
+            try {
+                val es = TerminalSession.execSession(command, socketPath)
+                execSession = es
+                try {
+                    val output = es.readAll()
+                    val exitCode = es.exitCode
+                    val formatted = buildString {
+                        if (output.isNotEmpty()) append(output)
+                        append("\n[Exit code: $exitCode]\n")
+                    }
+                    appendExecOutput(formatted)
+                } finally {
+                    es.close()
+                    execSession = null
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error running exec command", e)
+                appendExecOutput("Error: ${e.message}\n")
+            } finally {
+                _isExecRunning.value = false
+            }
+        }
+    }
+
+    fun execCommandStreaming(command: String, socketPath: String = "@ftyd") {
+        execJob = viewModelScope.launch(Dispatchers.IO) {
+            _isExecRunning.value = true
+            try {
+                val es = TerminalSession.execSession(command, socketPath)
+                execSession = es
+                try {
+                    es.output().collect { bytes ->
+                        val text = String(bytes, Charsets.UTF_8)
+                        appendExecOutput(text)
+                    }
+                    val exitCode = es.exitCode
+                    appendExecOutput("\n[Exit code: $exitCode]\n")
+                } finally {
+                    es.close()
+                    execSession = null
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error running streaming exec command", e)
+                appendExecOutput("Error: ${e.message}\n")
+            } finally {
+                _isExecRunning.value = false
+            }
+        }
+    }
+
+    fun stopExec() {
+        execJob?.cancel()
+        execJob = null
+
+        execSession?.close()
+        execSession = null
+
+        _isExecRunning.value = false
+        appendExecOutput("\n[Exec stopped]\n")
+    }
+
+    fun sendExecSignal(signum: Int) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                execSession?.sendSignal(signum)
+            } catch (e: Exception) {
+                Log.e(TAG, "Error sending signal to exec session", e)
+            }
+        }
+    }
+
+    fun clearExecOutput() {
+        _execOutput.update { "" }
+    }
+
     fun resizeTerminal(rows: Int, cols: Int) {
         viewModelScope.launch(Dispatchers.IO) {
             session?.resize(rows, cols)
@@ -117,9 +204,19 @@ class TerminalViewModel : ViewModel() {
         }
     }
 
+    private fun appendExecOutput(text: String) {
+        _execOutput.update { current ->
+            val combined = current + text
+            if (combined.length > MAX_OUTPUT_LENGTH) combined.takeLast(MAX_OUTPUT_LENGTH)
+            else combined
+        }
+    }
+
     override fun onCleared() {
         super.onCleared()
         readJob?.cancel()
         session?.close()
+        execJob?.cancel()
+        execSession?.close()
     }
 }

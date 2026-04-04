@@ -14,6 +14,10 @@ A native PTY (pseudo-terminal) library for Android, powered by pure C and the An
 - Signal whitelist for daemon sessions (security hardened)
 - ProGuard/R8 compatible with consumer rules included
 - Magisk module for automatic boot startup
+- **Exec mode** — run one-shot commands with clean pipe-based I/O (no PTY echo)
+- Exit code capture for exec sessions
+- Signal delivery to exec sessions (SIGINT, SIGTERM, SIGKILL, etc.)
+- Live streaming of exec command output via Flow
 
 ## Installation
 
@@ -33,7 +37,7 @@ Add the dependency to your module's `build.gradle.kts`:
 
 ```kotlin
 dependencies {
-    implementation("com.github.FuryForm:fury_terminal:v0.1.1")
+    implementation("com.github.FuryForm:fury_terminal:v0.3.0")
 }
 ```
 
@@ -108,6 +112,41 @@ session.sendSignal(2)   // SIGINT (Ctrl+C)
 session.sendSignal(20)  // SIGTSTP (Ctrl+Z)
 ```
 
+### Exec Mode (One-Shot Command)
+
+```kotlin
+// Run a command and get the complete result (blocks until done)
+val result = TerminalSession.exec("ls -la /")
+if (result.isSuccess) {
+    println(result.output)  // clean output, no echo
+} else {
+    println("Failed with exit code ${result.exitCode}")
+}
+```
+
+### Exec Mode with Streaming
+
+```kotlin
+// Stream output from a long-running command
+val session = TerminalSession.execSession("ping -c 5 google.com")
+session.use {
+    it.output().collect { bytes ->
+        print(String(bytes))  // live streaming, no echo
+    }
+    println("Exit code: ${it.exitCode}")
+}
+```
+
+### Send Signals to Exec Sessions
+
+```kotlin
+// Send signals to a running exec session (e.g., interrupt a long command)
+val session = TerminalSession.execSession("sleep 60")
+session.sendSignal(2)   // SIGINT — interrupt
+session.sendSignal(15)  // SIGTERM — graceful terminate
+session.sendSignal(9)   // SIGKILL — force kill
+```
+
 ## Architecture
 
 ```
@@ -119,8 +158,12 @@ session.sendSignal(20)  // SIGTSTP (Ctrl+Z)
         │                                  fork/exec
         │                                       │
         │  ┌─────────────┐               /system/bin/sh
-        └─▶│  ftyd daemon │ (daemon mode)
-           │  Unix socket  │──── fork/exec ──── /system/bin/sh (as root)
+        ├─▶│  ftyd daemon │ (interactive daemon mode)
+        │  │  Unix socket  │──── PTY ──── /system/bin/sh (as root)
+        │  └─────────────┘
+        │  ┌─────────────┐
+        └─▶│  ftyd daemon │ (exec mode)
+           │  Unix socket  │──── pipes ──── sh -c "command" (as root)
            └─────────────┘
 ```
 
@@ -129,23 +172,28 @@ session.sendSignal(20)  // SIGTSTP (Ctrl+Z)
 - **Native layer**: Pure C (~430 lines), no Go/Rust runtime overhead
 - **PTY**: Manual `posix_openpt` + `ptsname_r` (Android Bionic lacks `openpty`)
 - **Daemon**: `ftyd` — root PTY broker with heap-allocated sessions, atomic flags, shared protocol
+- **Exec mode**: Pipe-based I/O (no PTY), clean output without echo/prompts, exit code capture
 
 ### Daemon Protocol
 
 All messages: `[type:uint8][length:uint32 BE][data:length]` (max 1 MB per message)
 
-| Type   | Code | Data                     | Direction        |
-|--------|------|--------------------------|------------------|
-| DATA   | 0x01 | Raw bytes                | Both             |
-| RESIZE | 0x02 | rows(BE16) + cols(BE16)  | Client → Daemon  |
-| SIGNAL | 0x03 | signum(uint8)            | Client → Daemon  |
-| CLOSE  | 0x04 | (none)                   | Both             |
+| Type      | Code | Data                      | Direction        |
+|-----------|------|---------------------------|------------------|
+| DATA      | 0x01 | Raw bytes                 | Both             |
+| RESIZE    | 0x02 | rows(BE16) + cols(BE16)   | Client → Daemon  |
+| SIGNAL    | 0x03 | signum(uint8)             | Client → Daemon  |
+| CLOSE     | 0x04 | (none)                    | Both             |
+| EXEC      | 0x05 | Command string (UTF-8)    | Client → Daemon  |
+| EXIT_CODE | 0x06 | exit_code(int32 BE)       | Daemon → Client  |
 
 Allowed signals: SIGHUP, SIGINT, SIGQUIT, SIGKILL, SIGTERM, SIGCONT, SIGTSTP, SIGWINCH.
 
 ## Root Daemon (ftyd)
 
 The daemon runs as root and brokers PTY sessions for the app. Each connecting client gets its own isolated shell with proper cleanup (escalating SIGHUP → SIGTERM → SIGKILL).
+
+In exec mode, the daemon runs a single command via pipes (not a PTY), streams stdout+stderr back, and returns the exit code. This gives clean output without terminal echo, prompts, or line discipline noise — ideal for scripting and automation.
 
 ### Manual Start
 

@@ -49,6 +49,7 @@ typedef struct {
     int in_use;
     int is_daemon;    /* 1 = daemon socket session */
     int daemon_alive; /* 0 = CLOSE received from daemon */
+    int exit_code;    /* exit code from FTYD_EXIT_CODE, -1 if not received */
 } pty_entry;
 
 #define MAX_PTYS 16
@@ -63,6 +64,7 @@ static void init_ptys(void) {
         ptys[i].in_use = 0;
         ptys[i].is_daemon    = 0;
         ptys[i].daemon_alive = 0;
+        ptys[i].exit_code    = -1;
     }
 }
 
@@ -77,6 +79,7 @@ static int store_pty(int master, int pid) {
             ptys[i].in_use       = 1;
             ptys[i].is_daemon    = 0;
             ptys[i].daemon_alive = 0;
+            ptys[i].exit_code    = -1;
             id = i;
             break;
         }
@@ -96,6 +99,7 @@ static int store_daemon_session(int sock_fd) {
             ptys[i].in_use       = 1;
             ptys[i].is_daemon    = 1;
             ptys[i].daemon_alive = 1;
+            ptys[i].exit_code    = -1;
             id = i;
             break;
         }
@@ -144,6 +148,21 @@ static int get_daemon_alive(int id) {
     return a;
 }
 
+static void set_exit_code(int id, int code) {
+    if (id < 0 || id >= MAX_PTYS) return;
+    pthread_mutex_lock(&ptys_mutex);
+    if (ptys[id].in_use) ptys[id].exit_code = code;
+    pthread_mutex_unlock(&ptys_mutex);
+}
+
+static int get_exit_code(int id) {
+    if (id < 0 || id >= MAX_PTYS) return -1;
+    pthread_mutex_lock(&ptys_mutex);
+    int c = ptys[id].in_use ? ptys[id].exit_code : -1;
+    pthread_mutex_unlock(&ptys_mutex);
+    return c;
+}
+
 /* =================== READ / CLOSE =================== */
 
 typedef struct { char *data; int length; } read_result;
@@ -172,6 +191,7 @@ static void do_close_pty(int id) {
         ptys[id].in_use       = 0;
         ptys[id].is_daemon    = 0;
         ptys[id].daemon_alive = 0;
+        ptys[id].exit_code    = -1;
     }
     pthread_mutex_unlock(&ptys_mutex);
 
@@ -236,6 +256,26 @@ Java_com_furyform_terminal_NativePTY_nativeStartDaemonSession(
     return (jint)id;
 }
 
+JNIEXPORT jint JNICALL
+Java_com_furyform_terminal_NativePTY_nativeStartExecSession(
+        JNIEnv *env, jobject thiz, jstring jSocketPath, jstring jCommand) {
+    const char *path = (*env)->GetStringUTFChars(env, jSocketPath, NULL);
+    int fd = ftyd_connect(path);
+    (*env)->ReleaseStringUTFChars(env, jSocketPath, path);
+    if (fd < 0) return -1;
+
+    /* Send EXEC message with the command string */
+    const char *cmd = (*env)->GetStringUTFChars(env, jCommand, NULL);
+    uint32_t cmd_len = (uint32_t)strlen(cmd);
+    int rc = proto_send(fd, FTYD_EXEC, (const uint8_t *)cmd, cmd_len);
+    (*env)->ReleaseStringUTFChars(env, jCommand, cmd);
+    if (rc < 0) { close(fd); return -1; }
+
+    int id = store_daemon_session(fd);
+    if (id < 0) { close(fd); return -1; }
+    return (jint)id;
+}
+
 JNIEXPORT jbyteArray JNICALL
 Java_com_furyform_terminal_NativePTY_nativeRead(JNIEnv *env, jobject thiz, jint id) {
     session_info si = get_session_info((int)id);
@@ -243,8 +283,10 @@ Java_com_furyform_terminal_NativePTY_nativeRead(JNIEnv *env, jobject thiz, jint 
 
     if (si.is_daemon) {
         uint8_t buf[8192];
-        int n = proto_recv_data(si.fd, buf, sizeof(buf));
+        int exit_code = -1;
+        int n = proto_recv_data_ex(si.fd, buf, sizeof(buf), &exit_code);
         if (n <= 0) {
+            if (exit_code >= 0) set_exit_code((int)id, exit_code);
             set_daemon_dead((int)id);
             return NULL;
         }
@@ -340,4 +382,9 @@ Java_com_furyform_terminal_NativePTY_nativeIsAlive(JNIEnv *env, jobject thiz, ji
     }
     /* ret == -1: ECHILD (already reaped by someone else) */
     return JNI_FALSE;
+}
+
+JNIEXPORT jint JNICALL
+Java_com_furyform_terminal_NativePTY_nativeGetExitCode(JNIEnv *env, jobject thiz, jint id) {
+    return (jint)get_exit_code((int)id);
 }
