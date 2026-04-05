@@ -51,9 +51,13 @@ data class ExecResult(
  *
  * ## Exec mode (run command, get result — no PTY, no echo)
  * ```kotlin
+ * // Local (no root, no daemon needed)
  * val result = TerminalSession.exec("ls -la /")
  * println(result.output)    // clean output, no echo
  * println(result.exitCode)  // 0
+ *
+ * // Via daemon (root)
+ * val result = TerminalSession.exec("ls -la /data", socketPath = "@ftyd")
  * ```
  *
  * This class is thread-safe. The native layer uses mutex-protected session management.
@@ -119,10 +123,11 @@ class TerminalSession private constructor(
      * For non-blocking usage, use [output] which returns a Flow.
      */
     fun read(): ByteArray? {
-        check(!closed) { "Session is closed" }
-        activeReaders.incrementAndGet()
+        lock.read {
+            check(!closed) { "Session is closed" }
+            activeReaders.incrementAndGet()
+        }
         try {
-            if (closed) return null
             return NativePTY.nativeRead(id)
         } finally {
             activeReaders.decrementAndGet()
@@ -177,10 +182,12 @@ class TerminalSession private constructor(
      */
     fun output(): Flow<ByteArray> = flow {
         while (coroutineContext.isActive && !closed) {
-            activeReaders.incrementAndGet()
+            lock.read {
+                if (closed) return@flow
+                activeReaders.incrementAndGet()
+            }
             val data = try {
-                if (closed) null
-                else NativePTY.nativeRead(id)
+                NativePTY.nativeRead(id)
             } finally {
                 activeReaders.decrementAndGet()
             }
@@ -260,10 +267,11 @@ class TerminalSession private constructor(
          *
          * @param rows terminal height in rows (default 24)
          * @param cols terminal width in cols (default 80)
+         * @param shell the shell binary to launch (default: "/system/bin/sh")
          */
-        fun create(rows: Int = 24, cols: Int = 80): TerminalSession {
+        fun create(rows: Int = 24, cols: Int = 80, shell: String = "/system/bin/sh"): TerminalSession {
             NativePTY.ensureLoaded()
-            val id = NativePTY.nativeStartPTY(rows, cols)
+            val id = NativePTY.nativeStartPTY(rows, cols, shell)
             check(id >= 0) { "Failed to start PTY session (native returned $id)" }
             return TerminalSession(id)
         }
@@ -282,47 +290,54 @@ class TerminalSession private constructor(
          *   '/data/local/tmp/ftyd.sock' (default).
          * @param rows terminal height in rows (default 24)
          * @param cols terminal width in cols (default 80)
+         * @param shell the shell binary the daemon should launch (default: "/system/bin/sh")
          * @throws IllegalStateException if the daemon is not running or refused the connection
          */
         fun createDaemon(
             socketPath: String = "@ftyd",
             rows: Int = 24,
-            cols: Int = 80
+            cols: Int = 80,
+            shell: String = "/system/bin/sh"
         ): TerminalSession {
             NativePTY.ensureLoaded()
-            val id = NativePTY.nativeStartDaemonSession(socketPath, rows, cols)
+            val id = NativePTY.nativeStartDaemonSession(socketPath, rows, cols, shell)
             check(id >= 0) { "Failed to connect to ftyd at $socketPath — is the daemon running?" }
             return TerminalSession(id)
         }
 
         /**
-         * Execute a single command via the ftyd daemon and return the complete result.
+         * Execute a single command and return the complete result.
          *
          * Uses pipes (not a PTY) — no echo, no prompt, no terminal noise.
-         * The command runs as the daemon's user (typically root).
          * Blocks until the command finishes.
          *
+         * - If [socketPath] is `null` (default): runs locally as the app's own UID.
+         * - If [socketPath] is non-null (e.g. `"@ftyd"`): runs via daemon as root.
+         *
          * ```kotlin
+         * // Local (no root)
          * val result = TerminalSession.exec("ls -la /")
-         * if (result.isSuccess) {
-         *     println(result.output)
-         * } else {
-         *     println("Failed with exit code ${result.exitCode}")
-         * }
+         *
+         * // Via daemon (root)
+         * val result = TerminalSession.exec("ls -la /data", socketPath = "@ftyd")
          * ```
          *
          * For streaming output as it arrives, use [execSession] instead.
          *
-         * @param command the shell command to execute (passed to `sh -c`)
-         * @param socketPath path to the daemon socket (default: "@ftyd")
+         * @param command the shell command to execute (passed to `shell -c`)
+         * @param socketPath daemon socket path, or null for local exec (default: null)
+         * @param shell the shell binary to use (default: "/system/bin/sh")
          * @return [ExecResult] with the complete output and exit code
-         * @throws IllegalStateException if the daemon is not running or refused the connection
+         * @throws IllegalStateException if local fork fails or daemon is not running
          */
+        @JvmStatic
+        @JvmOverloads
         fun exec(
             command: String,
-            socketPath: String = "@ftyd"
+            socketPath: String? = null,
+            shell: String = "/system/bin/sh"
         ): ExecResult {
-            val session = execSession(command, socketPath)
+            val session = execSession(command, socketPath, shell)
             session.use {
                 val output = it.readAll()
                 val exitCode = it.exitCode
@@ -331,16 +346,24 @@ class TerminalSession private constructor(
         }
 
         /**
-         * Connect to a running ftyd daemon and start an exec session.
+         * Start an exec session for streaming output.
          *
          * Unlike [exec], this returns a [TerminalSession] that you can read from
          * incrementally (e.g., for live streaming of long-running commands).
          * Uses pipes (not a PTY) — no echo, no prompt.
          *
+         * - If [socketPath] is `null` (default): runs locally as the app's own UID.
+         * - If [socketPath] is non-null (e.g. `"@ftyd"`): runs via daemon as root.
+         *
          * Read output via [read]/[output], then check [exitCode] after EOF.
          *
          * ```kotlin
+         * // Local streaming
          * val session = TerminalSession.execSession("ping -c 5 google.com")
+         *
+         * // Daemon streaming
+         * val session = TerminalSession.execSession("dmesg -w", socketPath = "@ftyd")
+         *
          * session.use {
          *     it.output().collect { bytes ->
          *         print(String(bytes))  // live streaming
@@ -349,18 +372,28 @@ class TerminalSession private constructor(
          * }
          * ```
          *
-         * @param command the shell command to execute (passed to `sh -c`)
-         * @param socketPath path to the daemon socket (default: "@ftyd")
-         * @throws IllegalStateException if the daemon is not running or refused the connection
+         * @param command the shell command to execute (passed to `shell -c`)
+         * @param socketPath daemon socket path, or null for local exec (default: null)
+         * @param shell the shell binary to use (default: "/system/bin/sh")
+         * @throws IllegalStateException if local fork fails or daemon is not running
          */
+        @JvmStatic
+        @JvmOverloads
         fun execSession(
             command: String,
-            socketPath: String = "@ftyd"
+            socketPath: String? = null,
+            shell: String = "/system/bin/sh"
         ): TerminalSession {
             NativePTY.ensureLoaded()
-            val id = NativePTY.nativeStartExecSession(socketPath, command)
-            check(id >= 0) { "Failed to connect to ftyd at $socketPath for exec — is the daemon running?" }
-            return TerminalSession(id)
+            if (socketPath != null) {
+                val id = NativePTY.nativeStartExecSession(socketPath, command, shell)
+                check(id >= 0) { "Failed to connect to ftyd at $socketPath for exec — is the daemon running?" }
+                return TerminalSession(id)
+            } else {
+                val id = NativePTY.nativeStartLocalExecSession(shell, command)
+                check(id >= 0) { "Failed to start local exec session (native returned $id)" }
+                return TerminalSession(id)
+            }
         }
     }
 }

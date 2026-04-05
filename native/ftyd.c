@@ -15,7 +15,7 @@
  *
  * Client flow (exec):
  *   1. Connect to socket
- *   2. Send EXEC (payload = command string) — daemon runs sh -c via pipes
+ *   2. Send EXEC (payload = "shell\0command" or just "command") — daemon runs sh -c via pipes
  *   3. Receive DATA (stdout+stderr), then EXIT_CODE, then CLOSE
  *
  * Build: Android NDK clang, dynamic linking (liblog.so always available).
@@ -400,18 +400,44 @@ done:
  */
 static void handle_exec(int client_fd, const char *shell_path,
                         const uint8_t *cmd_buf, uint32_t cmd_len) {
+    /* Parse payload: "shell\0command" or just "command" (backward compat).
+     * If a NUL byte is found, everything before it is the shell path,
+     * everything after is the command.  Empty shell = use daemon default. */
+    const char *exec_shell = shell_path;
+    const uint8_t *cmd_start = cmd_buf;
+    uint32_t cmd_actual_len = cmd_len;
+
+    const uint8_t *nul = (const uint8_t *)memchr(cmd_buf, '\0', cmd_len);
+    if (nul != NULL && nul < cmd_buf + cmd_len) {
+        /* Found separator: payload is shell\0command */
+        uint32_t shell_len = (uint32_t)(nul - cmd_buf);
+        if (shell_len > 0) {
+            /* Client specified a shell — use it (it's already null-terminated at nul) */
+            static __thread char client_shell[256];
+            if (shell_len < sizeof(client_shell)) {
+                memcpy(client_shell, cmd_buf, shell_len);
+                client_shell[shell_len] = '\0';
+                exec_shell = client_shell;
+            }
+            /* else: shell path too long, fall back to daemon default */
+        }
+        /* Command starts after the NUL separator */
+        cmd_start = nul + 1;
+        cmd_actual_len = cmd_len - shell_len - 1;
+    }
+
     /* Null-terminate the command string */
-    char *command = (char *)malloc(cmd_len + 1);
+    char *command = (char *)malloc(cmd_actual_len + 1);
     if (!command) {
         LOGE("Client fd=%d: malloc failed for exec command\n", client_fd);
         proto_send(client_fd, FTYD_CLOSE, NULL, 0);
         close(client_fd);
         return;
     }
-    memcpy(command, cmd_buf, cmd_len);
-    command[cmd_len] = '\0';
+    memcpy(command, cmd_start, cmd_actual_len);
+    command[cmd_actual_len] = '\0';
 
-    LOGI("Client fd=%d: EXEC '%s'\n", client_fd, command);
+    LOGI("Client fd=%d: EXEC shell='%s' cmd='%s'\n", client_fd, exec_shell, command);
 
     /* Create pipes: stdout_pipe for stdout+stderr, stdin_pipe for stdin */
     int stdout_pipe[2]; /* [0]=read, [1]=write */
@@ -473,7 +499,7 @@ static void handle_exec(int client_fd, const char *shell_path,
         setenv("HOME", "/data/local/tmp", 0);
 
         /* Use sh -c to support pipes, redirects, etc. */
-        execl(shell_path, shell_path, "-c", command, (char *)NULL);
+        execl(exec_shell, exec_shell, "-c", command, (char *)NULL);
         _exit(127);
     }
 

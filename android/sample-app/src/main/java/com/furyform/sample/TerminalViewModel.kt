@@ -38,15 +38,15 @@ class TerminalViewModel : ViewModel() {
     private var execSession: TerminalSession? = null
     private var execJob: Job? = null
 
-    fun startTerminal(rows: Int = 24, cols: Int = 80, daemonSocketPath: String? = null) {
+    fun startTerminal(rows: Int = 24, cols: Int = 80, daemonSocketPath: String? = null, shell: String = "/system/bin/sh") {
         if (_isRunning.value) return  // prevent double-start
 
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 val newSession = if (daemonSocketPath != null)
-                    TerminalSession.createDaemon(daemonSocketPath, rows, cols)
+                    TerminalSession.createDaemon(daemonSocketPath, rows, cols, shell)
                 else
-                    TerminalSession.create(rows, cols)
+                    TerminalSession.create(rows, cols, shell)
                 session = newSession
                 _isRunning.value = true
 
@@ -79,11 +79,15 @@ class TerminalViewModel : ViewModel() {
         readJob?.cancel()
         readJob = null
 
-        session?.close()
+        val s = session
         session = null
-
         _isRunning.value = false
         appendOutput("\n[Terminal stopped]\n")
+
+        // Close off Main thread — session.close() can block up to 1s
+        if (s != null) {
+            viewModelScope.launch(Dispatchers.IO) { s.close() }
+        }
     }
 
     fun sendSignal(signum: Int) {
@@ -112,11 +116,11 @@ class TerminalViewModel : ViewModel() {
         _terminalOutput.update { "" }
     }
 
-    fun execCommand(command: String, socketPath: String = "@ftyd") {
+    fun execCommand(command: String, socketPath: String? = null, shell: String = "/system/bin/sh") {
         execJob = viewModelScope.launch(Dispatchers.IO) {
             _isExecRunning.value = true
             try {
-                val es = TerminalSession.execSession(command, socketPath)
+                val es = TerminalSession.execSession(command, socketPath, shell)
                 execSession = es
                 try {
                     val output = es.readAll()
@@ -139,11 +143,11 @@ class TerminalViewModel : ViewModel() {
         }
     }
 
-    fun execCommandStreaming(command: String, socketPath: String = "@ftyd") {
+    fun execCommandStreaming(command: String, socketPath: String? = null, shell: String = "/system/bin/sh") {
         execJob = viewModelScope.launch(Dispatchers.IO) {
             _isExecRunning.value = true
             try {
-                val es = TerminalSession.execSession(command, socketPath)
+                val es = TerminalSession.execSession(command, socketPath, shell)
                 execSession = es
                 try {
                     es.output().collect { bytes ->
@@ -169,11 +173,15 @@ class TerminalViewModel : ViewModel() {
         execJob?.cancel()
         execJob = null
 
-        execSession?.close()
+        val es = execSession
         execSession = null
-
         _isExecRunning.value = false
         appendExecOutput("\n[Exec stopped]\n")
+
+        // Close off Main thread — session.close() can block up to 1s
+        if (es != null) {
+            viewModelScope.launch(Dispatchers.IO) { es.close() }
+        }
     }
 
     fun sendExecSignal(signum: Int) {

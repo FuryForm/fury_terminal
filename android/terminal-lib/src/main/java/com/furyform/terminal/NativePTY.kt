@@ -18,8 +18,14 @@ internal object NativePTY {
         }
     }
 
-    /** Start a new PTY session. Returns session ID >= 0, or -1 on failure. */
-    external fun nativeStartPTY(rows: Int, cols: Int): Int
+    /**
+     * Start a new PTY session. Returns session ID >= 0, or -1 on failure.
+     *
+     * @param rows terminal height in rows
+     * @param cols terminal width in cols
+     * @param shell the shell binary to launch (e.g. "/system/bin/sh")
+     */
+    external fun nativeStartPTY(rows: Int, cols: Int, shell: String): Int
 
     /** Read bytes from PTY. Blocks until data available. Returns null on EOF/error. */
     external fun nativeRead(id: Int): ByteArray?
@@ -44,9 +50,12 @@ internal object NativePTY {
      * The daemon spawns the shell as its own user (typically root).
      *
      * @param socketPath path to the daemon socket. Prefix with '@' for abstract socket.
+     * @param rows terminal height in rows
+     * @param cols terminal width in cols
+     * @param shell the shell binary to launch (e.g. "/system/bin/sh")
      * @return session ID >= 0, or -1 on failure (daemon not running or refused connection).
      */
-    external fun nativeStartDaemonSession(socketPath: String, rows: Int, cols: Int): Int
+    external fun nativeStartDaemonSession(socketPath: String, rows: Int, cols: Int, shell: String): Int
 
     /**
      * Connect to a ftyd daemon and execute a single command.
@@ -55,9 +64,13 @@ internal object NativePTY {
      *
      * @param socketPath path to the daemon socket. Prefix with '@' for abstract socket.
      * @param command the shell command to execute (passed to sh -c).
+     * @param shell the shell binary the daemon should use. Empty string means the daemon's default.
      * @return session ID >= 0, or -1 on failure.
      */
-    external fun nativeStartExecSession(socketPath: String, command: String): Int
+    external fun nativeStartExecSession(socketPath: String, command: String, shell: String): Int
+
+    /** Start a local exec session (fork+pipes, no daemon). Returns session ID >= 0, or -1 on failure. */
+    external fun nativeStartLocalExecSession(shell: String, command: String): Int
 
     /**
      * Get the exit code from a completed exec session.

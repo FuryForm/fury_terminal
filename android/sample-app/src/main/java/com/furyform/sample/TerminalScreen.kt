@@ -101,6 +101,7 @@ private fun InteractiveTab(viewModel: TerminalViewModel) {
     var commandInput by remember { mutableStateOf("") }
     var daemonMode by remember { mutableStateOf(false) }
     var socketPath by remember { mutableStateOf("@ftyd") }
+    var shellPath by remember { mutableStateOf("/system/bin/sh") }
     val scrollState = rememberLazyListState()
 
     LaunchedEffect(terminalOutput) {
@@ -141,7 +142,7 @@ private fun InteractiveTab(viewModel: TerminalViewModel) {
             }
         }
 
-        // Daemon mode toggle + socket path (only when stopped)
+        // Daemon mode toggle + shell path (only when stopped)
         if (!isRunning) {
             Row(
                 modifier = Modifier
@@ -158,7 +159,33 @@ private fun InteractiveTab(viewModel: TerminalViewModel) {
                 ) {
                     Text(if (daemonMode) "Daemon" else "Local", fontSize = 12.sp, fontFamily = FontFamily.Monospace)
                 }
-                if (daemonMode) {
+                BasicTextField(
+                    value = shellPath,
+                    onValueChange = { shellPath = it },
+                    textStyle = TextStyle(color = Color.White, fontFamily = FontFamily.Monospace, fontSize = 12.sp),
+                    cursorBrush = SolidColor(Color.White),
+                    modifier = Modifier
+                        .weight(1f)
+                        .padding(start = 8.dp)
+                        .background(Color(0xFF222222))
+                        .padding(8.dp),
+                    decorationBox = { innerTextField ->
+                        Box {
+                            if (shellPath.isEmpty()) {
+                                Text("Shell: /system/bin/sh", color = Color.Gray, style = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 12.sp))
+                            }
+                            innerTextField()
+                        }
+                    }
+                )
+            }
+            if (daemonMode) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
                     BasicTextField(
                         value = socketPath,
                         onValueChange = { socketPath = it },
@@ -166,9 +193,16 @@ private fun InteractiveTab(viewModel: TerminalViewModel) {
                         cursorBrush = SolidColor(Color.White),
                         modifier = Modifier
                             .weight(1f)
-                            .padding(start = 8.dp)
                             .background(Color(0xFF222222))
-                            .padding(8.dp)
+                            .padding(8.dp),
+                        decorationBox = { innerTextField ->
+                            Box {
+                                if (socketPath.isEmpty()) {
+                                    Text("Socket path", color = Color.Gray, style = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 12.sp))
+                                }
+                                innerTextField()
+                            }
+                        }
                     )
                 }
             }
@@ -178,7 +212,7 @@ private fun InteractiveTab(viewModel: TerminalViewModel) {
         Button(
             onClick = {
                 if (isRunning) viewModel.stopTerminal()
-                else viewModel.startTerminal(daemonSocketPath = if (daemonMode) socketPath else null)
+                else viewModel.startTerminal(daemonSocketPath = if (daemonMode) socketPath else null, shell = shellPath)
             },
             colors = ButtonDefaults.buttonColors(
                 containerColor = if (isRunning) Color(0xFF882222) else Color(0xFF228822)
@@ -292,6 +326,8 @@ private fun ExecTab(viewModel: TerminalViewModel) {
     val isExecRunning by viewModel.isExecRunning.collectAsState()
     var commandInput by remember { mutableStateOf("") }
     var socketPath by remember { mutableStateOf("@ftyd") }
+    var daemonMode by remember { mutableStateOf(false) }
+    var shellPath by remember { mutableStateOf("/system/bin/sh") }
     val scrollState = rememberLazyListState()
 
     LaunchedEffect(execOutput) {
@@ -370,34 +406,73 @@ private fun ExecTab(viewModel: TerminalViewModel) {
             }
         }
 
-        // Socket path input
+        // Exec mode toggle + shell path
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(vertical = 4.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Text(
-                text = "Socket:",
-                color = Color(0xFF888888),
-                fontFamily = FontFamily.Monospace,
-                fontSize = 12.sp,
-                modifier = Modifier.padding(end = 8.dp)
-            )
-            BasicTextField(
-                value = socketPath,
-                onValueChange = { socketPath = it },
-                textStyle = TextStyle(
-                    color = Color.White,
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 12.sp
+            Button(
+                onClick = { daemonMode = !daemonMode },
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = if (daemonMode) Color(0xFF225588) else Color(0xFF444444)
                 ),
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp, vertical = 6.dp)
+            ) {
+                Text(if (daemonMode) "Daemon" else "Local", fontSize = 12.sp, fontFamily = FontFamily.Monospace)
+            }
+            BasicTextField(
+                value = shellPath,
+                onValueChange = { shellPath = it },
+                textStyle = TextStyle(color = Color.White, fontFamily = FontFamily.Monospace, fontSize = 12.sp),
                 cursorBrush = SolidColor(Color.White),
                 modifier = Modifier
                     .weight(1f)
+                    .padding(start = 8.dp)
                     .background(Color(0xFF222222))
-                    .padding(8.dp)
+                    .padding(8.dp),
+                decorationBox = { innerTextField ->
+                    Box {
+                        if (shellPath.isEmpty()) {
+                            Text("Shell: /system/bin/sh", color = Color.Gray, style = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 12.sp))
+                        }
+                        innerTextField()
+                    }
+                }
             )
+        }
+
+        // Socket path input (only in daemon mode)
+        if (daemonMode) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "Socket:",
+                    color = Color(0xFF888888),
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 12.sp,
+                    modifier = Modifier.padding(end = 8.dp)
+                )
+                BasicTextField(
+                    value = socketPath,
+                    onValueChange = { socketPath = it },
+                    textStyle = TextStyle(
+                        color = Color.White,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 12.sp
+                    ),
+                    cursorBrush = SolidColor(Color.White),
+                    modifier = Modifier
+                        .weight(1f)
+                        .background(Color(0xFF222222))
+                        .padding(8.dp)
+                )
+            }
         }
 
         // Command input
@@ -442,7 +517,11 @@ private fun ExecTab(viewModel: TerminalViewModel) {
             Button(
                 onClick = {
                     if (commandInput.isNotEmpty()) {
-                        viewModel.execCommand(commandInput, socketPath)
+                        viewModel.execCommand(
+                            commandInput,
+                            socketPath = if (daemonMode) socketPath else null,
+                            shell = shellPath
+                        )
                     }
                 },
                 enabled = !isExecRunning && commandInput.isNotEmpty(),
@@ -457,7 +536,11 @@ private fun ExecTab(viewModel: TerminalViewModel) {
             Button(
                 onClick = {
                     if (commandInput.isNotEmpty()) {
-                        viewModel.execCommandStreaming(commandInput, socketPath)
+                        viewModel.execCommandStreaming(
+                            commandInput,
+                            socketPath = if (daemonMode) socketPath else null,
+                            shell = shellPath
+                        )
                     }
                 },
                 enabled = !isExecRunning && commandInput.isNotEmpty(),

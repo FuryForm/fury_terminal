@@ -100,4 +100,60 @@ class TerminalViewModelTest {
             vm.terminalOutput.value.contains("[Terminal stopped]")
         )
     }
+
+    // =================== Exec Initial State ===================
+
+    @Test
+    fun initialState_execOutputIsEmpty() {
+        val vm = TerminalViewModel()
+        assertEquals("", vm.execOutput.value)
+    }
+
+    @Test
+    fun initialState_isExecNotRunning() {
+        val vm = TerminalViewModel()
+        assertFalse(vm.isExecRunning.value)
+    }
+
+    // =================== clearExecOutput ===================
+
+    @Test
+    fun clearExecOutput_resetsToEmpty() {
+        val vm = TerminalViewModel()
+        vm.clearExecOutput()
+        assertEquals("", vm.execOutput.value)
+    }
+
+    // =================== stopExec ===================
+
+    @Test
+    fun stopExec_whenNotRunning_doesNotCrash() {
+        val vm = TerminalViewModel()
+        vm.stopExec()
+    }
+
+    @Test
+    fun stopExec_setsExecNotRunning() {
+        val vm = TerminalViewModel()
+        vm.stopExec()
+        assertFalse(vm.isExecRunning.value)
+    }
+
+    @Test
+    fun stopExec_appendsStoppedMessage() {
+        val vm = TerminalViewModel()
+        vm.stopExec()
+        assertTrue(
+            "Exec output should contain stopped message, got: ${vm.execOutput.value}",
+            vm.execOutput.value.contains("[Exec stopped]")
+        )
+    }
+
+    // =================== sendExecSignal ===================
+
+    @Test
+    fun sendExecSignal_whenNotRunning_doesNotCrash() {
+        val vm = TerminalViewModel()
+        vm.sendExecSignal(2) // SIGINT
+    }
 }
