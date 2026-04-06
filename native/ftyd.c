@@ -38,6 +38,9 @@
 #define MAX_CLIENTS         16
 #define BUF_SIZE            8192
 #define PID_FILE            "/data/local/tmp/ftyd.pid"
+#define AUTH_CONF_PATH      "/data/local/tmp/ftyd.conf"
+#define PACKAGES_LIST_PATH  "/data/system/packages.list"
+#define MAX_ALLOWED_UIDS    64
 
 /* =================== LOGGING =================== */
 
@@ -52,6 +55,155 @@
 #define LOGI(...) fprintf(stderr, __VA_ARGS__)
 #define LOGE(...) fprintf(stderr, __VA_ARGS__)
 #endif
+
+/* =================== AUTH: UID ALLOWLIST =================== */
+
+/**
+ * Optional UID-based authentication via SO_PEERCRED.
+ * Disabled by default — enable with -a flag.
+ *
+ * When enabled, only connections from allowed UIDs are accepted.
+ * UIDs 0 (root) and 2000 (shell/adb) are always allowed.
+ *
+ * Config file format (one directive per line, '#' comments):
+ *   allow com.example.myapp      # Allow by package name
+ *   allow_uid 10245              # Allow by raw UID
+ *
+ * Package names are resolved to UIDs via /data/system/packages.list
+ * at startup and on SIGHUP. Unresolvable packages are logged and skipped.
+ */
+
+static struct {
+    uid_t uids[MAX_ALLOWED_UIDS];
+    int   count;
+    int   enabled;  /* 0 = auth disabled (default), 1 = enabled via -a */
+} g_auth;
+
+static pthread_rwlock_t g_auth_lock = PTHREAD_RWLOCK_INITIALIZER;
+
+/* Add a UID to the allowlist (no duplicates). Returns 0 on success. */
+static int auth_add_uid(uid_t uid) {
+    for (int i = 0; i < g_auth.count; i++) {
+        if (g_auth.uids[i] == uid) return 0; /* already present */
+    }
+    if (g_auth.count >= MAX_ALLOWED_UIDS) {
+        LOGE("Auth: allowlist full (max %d UIDs)\n", MAX_ALLOWED_UIDS);
+        return -1;
+    }
+    g_auth.uids[g_auth.count++] = uid;
+    return 0;
+}
+
+/* Resolve a package name to UID via /data/system/packages.list.
+ * Format: "package_name uid gid ..." one per line.
+ * Returns UID >= 0 on success, -1 if not found. */
+static int auth_resolve_package(const char *package) {
+    FILE *f = fopen(PACKAGES_LIST_PATH, "r");
+    if (!f) {
+        LOGE("Auth: cannot open %s: %s\n", PACKAGES_LIST_PATH, strerror(errno));
+        return -1;
+    }
+    char line[512];
+    int result = -1;
+    while (fgets(line, sizeof(line), f)) {
+        char pkg[256];
+        unsigned int uid;
+        if (sscanf(line, "%255s %u", pkg, &uid) == 2) {
+            if (strcmp(pkg, package) == 0) {
+                result = (int)uid;
+                break;
+            }
+        }
+    }
+    fclose(f);
+    return result;
+}
+
+/* Load auth config file. Resets allowlist and re-adds defaults + config entries. */
+static void auth_load_config(const char *conf_path) {
+    pthread_rwlock_wrlock(&g_auth_lock);
+
+    /* Reset to defaults */
+    g_auth.count = 0;
+    auth_add_uid(0);    /* root — always allowed */
+    auth_add_uid(2000); /* shell (adb) — always allowed */
+
+    FILE *f = fopen(conf_path, "r");
+    if (!f) {
+        LOGI("Auth: no config at %s — defaults only (root + shell)\n", conf_path);
+        pthread_rwlock_unlock(&g_auth_lock);
+        return;
+    }
+
+    char line[512];
+    while (fgets(line, sizeof(line), f)) {
+        /* Strip comments */
+        char *hash = strchr(line, '#');
+        if (hash) *hash = '\0';
+
+        /* Try "allow_uid <N>" */
+        unsigned int uid;
+        if (sscanf(line, " allow_uid %u", &uid) == 1) {
+            auth_add_uid((uid_t)uid);
+            LOGI("Auth: allow_uid %u\n", uid);
+            continue;
+        }
+
+        /* Try "allow <package_name>" */
+        char package[256];
+        if (sscanf(line, " allow %255s", package) == 1) {
+            int resolved = auth_resolve_package(package);
+            if (resolved >= 0) {
+                auth_add_uid((uid_t)resolved);
+                LOGI("Auth: allow %s (uid=%d)\n", package, resolved);
+            } else {
+                LOGE("Auth: package '%s' not found in %s — skipped\n",
+                     package, PACKAGES_LIST_PATH);
+            }
+            continue;
+        }
+
+        /* Ignore blank/whitespace-only lines */
+    }
+    fclose(f);
+    LOGI("Auth: loaded %d allowed UIDs from %s\n", g_auth.count, conf_path);
+
+    pthread_rwlock_unlock(&g_auth_lock);
+}
+
+/* Check if a UID is in the allowlist. */
+static int auth_uid_allowed(uid_t uid) {
+    pthread_rwlock_rdlock(&g_auth_lock);
+    for (int i = 0; i < g_auth.count; i++) {
+        if (g_auth.uids[i] == uid) {
+            pthread_rwlock_unlock(&g_auth_lock);
+            return 1;
+        }
+    }
+    pthread_rwlock_unlock(&g_auth_lock);
+    return 0;
+}
+
+/* Check connecting client via SO_PEERCRED.
+ * Returns 0 if allowed (or auth disabled), -1 if rejected. */
+static int auth_check_peer(int client_fd) {
+    if (!g_auth.enabled) return 0; /* Auth disabled — allow all */
+
+    struct ucred cred;
+    socklen_t len = sizeof(cred);
+    if (getsockopt(client_fd, SOL_SOCKET, SO_PEERCRED, &cred, &len) < 0) {
+        LOGE("Auth: SO_PEERCRED failed fd=%d: %s\n", client_fd, strerror(errno));
+        return -1; /* Cannot verify — reject (fail-closed) */
+    }
+
+    if (auth_uid_allowed(cred.uid)) {
+        LOGD("Auth: accepted UID=%u PID=%d\n", cred.uid, cred.pid);
+        return 0;
+    }
+
+    LOGE("Auth: rejected UID=%u PID=%d (not in allowlist)\n", cred.uid, cred.pid);
+    return -1;
+}
 
 /* =================== EXEC PID TABLE =================== */
 
@@ -613,10 +765,16 @@ static void *client_thread_fn(void *arg) {
 /* =================== SIGNAL HANDLING =================== */
 
 static volatile int g_running = 1;
+static volatile int g_reload  = 0;
 
 static void sig_handler(int sig) {
     (void)sig;
     g_running = 0;
+}
+
+static void sighup_handler(int sig) {
+    (void)sig;
+    g_reload = 1;
 }
 
 /* =================== DAEMONIZE =================== */
@@ -742,31 +900,44 @@ static void usage(const char *prog) {
         "  -S SHELL   Shell binary (default: %s)\n"
         "  -f         Run in foreground (don't daemonize)\n"
         "  -p FILE    PID file path (default: %s)\n"
+        "  -a         Enable UID authentication (default: disabled)\n"
+        "  -c FILE    Auth config file (default: %s)\n"
+        "             Requires -a. Send SIGHUP to reload.\n"
         "  -h         Show this help\n"
         "\n"
+        "Auth config format (one per line, '#' comments):\n"
+        "  allow com.example.myapp      # Allow by package name\n"
+        "  allow_uid 10245              # Allow by raw UID\n"
+        "  UIDs 0 (root) and 2000 (shell) are always allowed.\n"
+        "\n"
         "Examples:\n"
-        "  %s                          # Daemonize with defaults\n"
+        "  %s                          # Daemonize, no auth\n"
         "  %s -f                       # Foreground mode\n"
+        "  %s -a                       # Enable auth (root+shell only)\n"
+        "  %s -a -c /data/local/tmp/ftyd.conf  # Auth with config\n"
         "  %s -s @ftyd              # Abstract socket\n"
         "  %s -s /data/local/tmp/td.sock -S /system/bin/sh\n"
         "\n",
-        prog, DEFAULT_SOCKET_PATH, DEFAULT_SHELL, PID_FILE,
-        prog, prog, prog, prog);
+        prog, DEFAULT_SOCKET_PATH, DEFAULT_SHELL, PID_FILE, AUTH_CONF_PATH,
+        prog, prog, prog, prog, prog, prog);
 }
 
 int main(int argc, char *argv[]) {
     const char *socket_path = DEFAULT_SOCKET_PATH;
     const char *shell_path  = DEFAULT_SHELL;
     const char *pid_file    = PID_FILE;
+    const char *auth_conf   = AUTH_CONF_PATH;
     int foreground = 0;
 
     int opt;
-    while ((opt = getopt(argc, argv, "s:S:fp:h")) != -1) {
+    while ((opt = getopt(argc, argv, "s:S:fp:ac:h")) != -1) {
         switch (opt) {
         case 's': socket_path = optarg; break;
         case 'S': shell_path  = optarg; break;
         case 'f': foreground  = 1;      break;
         case 'p': pid_file    = optarg; break;
+        case 'a': g_auth.enabled = 1;   break;
+        case 'c': auth_conf   = optarg; break;
         case 'h': usage(argv[0]); return 0;
         default:  usage(argv[0]); return 1;
         }
@@ -790,7 +961,17 @@ int main(int argc, char *argv[]) {
     sa.sa_flags = SA_RESTART | SA_NOCLDSTOP;
     sigaction(SIGCHLD, &sa, NULL);
 
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = sighup_handler;
+    sa.sa_flags = SA_RESTART;
+    sigaction(SIGHUP, &sa, NULL);
+
     signal(SIGPIPE, SIG_IGN);
+
+    /* Load auth config if auth enabled */
+    if (g_auth.enabled) {
+        auth_load_config(auth_conf);
+    }
 
     /* Daemonize unless -f */
     if (!foreground) {
@@ -804,8 +985,9 @@ int main(int argc, char *argv[]) {
     /* Write PID file */
     write_pid_file(pid_file);
 
-    LOGI("ftyd started: socket=%s shell=%s pid=%d\n",
-         socket_path, shell_path, getpid());
+    LOGI("ftyd started: socket=%s shell=%s pid=%d auth=%s\n",
+         socket_path, shell_path, getpid(),
+         g_auth.enabled ? "on" : "off");
 
     /* Accept loop */
     while (g_running) {
@@ -814,8 +996,33 @@ int main(int argc, char *argv[]) {
         int client_fd = accept(listen_fd, (struct sockaddr *)&client_addr, &client_len);
 
         if (client_fd < 0) {
-            if (errno == EINTR) continue; /* signal interrupted accept */
+            if (errno == EINTR) {
+                /* Check for SIGHUP reload request */
+                if (g_reload) {
+                    g_reload = 0;
+                    if (g_auth.enabled) {
+                        LOGI("SIGHUP received, reloading auth config\n");
+                        auth_load_config(auth_conf);
+                    }
+                }
+                continue; /* signal interrupted accept */
+            }
             LOGE("accept() failed: %s\n", strerror(errno));
+            continue;
+        }
+
+        /* Check for SIGHUP reload (in case accept succeeded before we checked) */
+        if (g_reload) {
+            g_reload = 0;
+            if (g_auth.enabled) {
+                LOGI("SIGHUP received, reloading auth config\n");
+                auth_load_config(auth_conf);
+            }
+        }
+
+        /* Auth check: verify client UID */
+        if (auth_check_peer(client_fd) != 0) {
+            close(client_fd);
             continue;
         }
 
