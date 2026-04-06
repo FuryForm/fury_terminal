@@ -18,6 +18,7 @@ A native PTY (pseudo-terminal) library for Android, powered by pure C and the An
 - **Unified API** — `exec()`/`execSession()` route to local or daemon via `socketPath` parameter
 - **Local exec** — fork+pipe exec without root or daemon (runs as app UID)
 - **Custom shell** — configurable shell binary for all session types
+- **UID authentication** — optional SO_PEERCRED-based allowlist for daemon connections (disabled by default)
 - Exit code capture for exec sessions (blocking `waitpid` for local, protocol for daemon)
 - Signal delivery to exec sessions (SIGINT, SIGTERM, SIGKILL, etc.)
 - Live streaming of exec command output via Flow
@@ -40,7 +41,7 @@ Add the dependency to your module's `build.gradle.kts`:
 
 ```kotlin
 dependencies {
-    implementation("com.github.FuryForm:fury_terminal:v0.4.0")
+    implementation("com.github.FuryForm:fury_terminal:v0.5.0")
 }
 ```
 
@@ -267,8 +268,56 @@ ftyd [options]
   -S SHELL   Shell binary (default: /system/bin/sh)
   -f         Run in foreground (don't daemonize)
   -p FILE    PID file path (default: /data/local/tmp/ftyd.pid)
+  -a         Enable UID authentication (default: disabled)
+  -c FILE    Auth config file (default: /data/local/tmp/ftyd.conf)
+             Requires -a. Send SIGHUP to reload.
   -h         Show help
 ```
+
+## Daemon Authentication
+
+The daemon supports optional UID-based authentication via `SO_PEERCRED`. When enabled, only connections from allowed UIDs are accepted. **Auth is disabled by default** for backward compatibility.
+
+### Enable Authentication
+
+```bash
+# Auth on — only root (UID 0) and shell (UID 2000) can connect
+adb shell su -c '/data/local/tmp/ftyd -a'
+
+# Auth on with config file
+adb shell su -c '/data/local/tmp/ftyd -a -c /data/local/tmp/ftyd.conf'
+```
+
+### Config File Format
+
+```ini
+# /data/local/tmp/ftyd.conf
+# Allow by package name (resolved via /data/system/packages.list)
+allow com.furyform.sample
+allow com.example.myapp
+
+# Allow by raw UID
+allow_uid 10245
+
+# UIDs 0 (root) and 2000 (shell) are always allowed.
+# Blank lines and comments (#) are ignored.
+```
+
+### Reload Config
+
+Send `SIGHUP` to reload the config without restarting:
+
+```bash
+kill -HUP $(cat /data/local/tmp/ftyd.pid)
+```
+
+### How It Works
+
+- Uses `SO_PEERCRED` (`getsockopt`) after `accept()` to get the kernel-attested UID of the connecting process
+- The UID cannot be spoofed — it is set by the kernel at `connect()` time
+- Fail-closed: if `SO_PEERCRED` fails or the UID is not in the allowlist, the connection is rejected immediately
+- No protocol changes — authentication is transparent to the client library
+- Thread-safe: a `pthread_rwlock` protects the allowlist during SIGHUP reloads
 
 ## Building
 
@@ -311,7 +360,7 @@ fury_terminal/
 ## Security Notes
 
 - **Local sessions** run as the app's UID — no elevated privileges
-- **Daemon sessions** run as root — the daemon is accessible to any process that can connect to the abstract socket `@ftyd`
+- **Daemon sessions** run as root — by default any process can connect to `@ftyd`. Enable `-a` flag for UID-based authentication
 - Signal injection is restricted to a whitelist (no arbitrary `kill()`)
 - Message size is capped at 1 MB to prevent DoS
 - File creation mask is `022` (not world-writable)

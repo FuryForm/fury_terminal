@@ -148,6 +148,9 @@ gracefully skip (try/catch) if the daemon is unavailable.
   daemon exec (pipe-based). All share the same session table and read/write/close JNI methods.
 - **Blocking waitpid**: `nativeGetExitCode` uses blocking `waitpid(0)` for local exec sessions
   (pipe EOF guarantees child is done). `nativeIsAlive` uses `waitpid(WNOHANG)`.
+- **Daemon auth**: Optional UID-based authentication via `SO_PEERCRED` (enabled with `-a` flag).
+  Config file supports `allow <package>` and `allow_uid <N>`. SIGHUP reloads config.
+  `pthread_rwlock` protects the allowlist for thread-safe concurrent access.
 - **TOCTOU protection**: `read()`/`output()` acquire a read-lock around the `closed` check and
   `activeReaders.incrementAndGet()` atomically; the actual `nativeRead` call is outside the lock.
 
@@ -160,6 +163,6 @@ Instrumented tests require a device and run locally only.
 
 JitPack coordinate: `com.github.FuryForm:fury_terminal`
 Version is set in `android/terminal-lib/build.gradle.kts` `afterEvaluate` block.
-Tag format: `v0.4.0` (must match the version string in build.gradle.kts).
+Tag format: `v0.5.0` (must match the version string in build.gradle.kts).
 
 **Important**: please do code review for correctness, refactor, cleanup, and validate the code style/best practices before update version and update readme before commit/publish.

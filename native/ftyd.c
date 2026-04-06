@@ -375,7 +375,7 @@ static void handle_client(int client_fd, const char *shell_path) {
 
     LOGI("Client fd=%d: shell started (pid=%d)\n", client_fd, shell_pid);
 
-    /* Step 3: Heap-allocate session (BUG-1: avoid use-after-free on stack) */
+    /* Heap-allocate session to avoid use-after-free if reader thread outlives stack frame */
     client_session *session = (client_session *)malloc(sizeof(client_session));
     if (!session) {
         LOGE("Client fd=%d: malloc failed for session\n", client_fd);
@@ -401,7 +401,7 @@ static void handle_client(int client_fd, const char *shell_path) {
         free(session);
         return;
     }
-    /* BUG-1: Do NOT detach — we join at cleanup to avoid use-after-free */
+    /* Join (not detach) so reader_thread_fn doesn't outlive the heap-allocated session */
 
     /* Step 4: Main loop — read messages from client, dispatch to PTY */
     while (atomic_load(&session->alive)) {
@@ -431,7 +431,7 @@ static void handle_client(int client_fd, const char *shell_path) {
         case FTYD_SIGNAL:
             if (msg_len >= 1) {
                 int sig = (int)msg_buf[0];
-                /* SEC-2: Whitelist signals — reject arbitrary signal injection */
+                /* Whitelist signals — reject arbitrary signal injection */
                 if (ftyd_signal_allowed(sig)) {
                     kill(-shell_pid, sig);
                 } else {
@@ -472,8 +472,8 @@ cleanup:
      * didn't fully unblock it (e.g., orphaned grandchildren). */
     close(master);
 
-    /* BUG-1: Join (not detach) so we don't free session while thread runs.
-     * Reader will exit because master_fd is now closed → read() returns -1. */
+    /* Join reader thread — it will exit because master_fd is now closed → read() returns -1.
+     * Must join (not detach) so we don't free session while the thread still runs. */
     pthread_join(session->reader_tid, NULL);
 
     close(client_fd);
@@ -558,6 +558,7 @@ static void handle_exec(int client_fd, const char *shell_path,
     const char *exec_shell = shell_path;
     const uint8_t *cmd_start = cmd_buf;
     uint32_t cmd_actual_len = cmd_len;
+    char client_shell[256];
 
     const uint8_t *nul = (const uint8_t *)memchr(cmd_buf, '\0', cmd_len);
     if (nul != NULL && nul < cmd_buf + cmd_len) {
@@ -565,7 +566,6 @@ static void handle_exec(int client_fd, const char *shell_path,
         uint32_t shell_len = (uint32_t)(nul - cmd_buf);
         if (shell_len > 0) {
             /* Client specified a shell — use it (it's already null-terminated at nul) */
-            static __thread char client_shell[256];
             if (shell_len < sizeof(client_shell)) {
                 memcpy(client_shell, cmd_buf, shell_len);
                 client_shell[shell_len] = '\0';
@@ -764,8 +764,8 @@ static void *client_thread_fn(void *arg) {
 
 /* =================== SIGNAL HANDLING =================== */
 
-static volatile int g_running = 1;
-static volatile int g_reload  = 0;
+static volatile sig_atomic_t g_running = 1;
+static volatile sig_atomic_t g_reload  = 0;
 
 static void sig_handler(int sig) {
     (void)sig;
@@ -804,7 +804,7 @@ static void daemonize(void) {
     /* Set working directory */
     chdir("/");
 
-    /* SEC-5: Restrict file creation mask (was umask(0) — too permissive) */
+    /* Restrict file creation mask — not world-writable */
     umask(022);
 }
 
