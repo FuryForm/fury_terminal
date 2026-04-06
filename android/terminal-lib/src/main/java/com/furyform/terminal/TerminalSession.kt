@@ -269,6 +269,8 @@ class TerminalSession private constructor(
          * @param cols terminal width in cols (default 80)
          * @param shell the shell binary to launch (default: "/system/bin/sh")
          */
+        @JvmStatic
+        @JvmOverloads
         fun create(rows: Int = 24, cols: Int = 80, shell: String = "/system/bin/sh"): TerminalSession {
             NativePTY.ensureLoaded()
             val id = NativePTY.nativeStartPTY(rows, cols, shell)
@@ -293,6 +295,8 @@ class TerminalSession private constructor(
          * @param shell the shell binary the daemon should launch (default: "/system/bin/sh")
          * @throws IllegalStateException if the daemon is not running or refused the connection
          */
+        @JvmStatic
+        @JvmOverloads
         fun createDaemon(
             socketPath: String = "@ftyd",
             rows: Int = 24,

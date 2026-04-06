@@ -15,7 +15,10 @@ A native PTY (pseudo-terminal) library for Android, powered by pure C and the An
 - ProGuard/R8 compatible with consumer rules included
 - Magisk module for automatic boot startup
 - **Exec mode** — run one-shot commands with clean pipe-based I/O (no PTY echo)
-- Exit code capture for exec sessions
+- **Unified API** — `exec()`/`execSession()` route to local or daemon via `socketPath` parameter
+- **Local exec** — fork+pipe exec without root or daemon (runs as app UID)
+- **Custom shell** — configurable shell binary for all session types
+- Exit code capture for exec sessions (blocking `waitpid` for local, protocol for daemon)
 - Signal delivery to exec sessions (SIGINT, SIGTERM, SIGKILL, etc.)
 - Live streaming of exec command output via Flow
 
@@ -37,7 +40,7 @@ Add the dependency to your module's `build.gradle.kts`:
 
 ```kotlin
 dependencies {
-    implementation("com.github.FuryForm:fury_terminal:v0.3.0")
+    implementation("com.github.FuryForm:fury_terminal:v0.4.0")
 }
 ```
 
@@ -114,20 +117,26 @@ session.sendSignal(20)  // SIGTSTP (Ctrl+Z)
 
 ### Exec Mode (One-Shot Command)
 
+Run a command via pipes (no PTY) — clean output without echo, prompts, or terminal noise.
+Returns an `ExecResult` with `output: String`, `exitCode: Int`, and `isSuccess: Boolean`.
+
 ```kotlin
-// Run a command and get the complete result (blocks until done)
+// Local exec (no root, no daemon needed — runs as app UID)
 val result = TerminalSession.exec("ls -la /")
 if (result.isSuccess) {
     println(result.output)  // clean output, no echo
 } else {
     println("Failed with exit code ${result.exitCode}")
 }
+
+// Exec via daemon (root) — same API, just add socketPath
+val result = TerminalSession.exec("ls -la /data", socketPath = "@ftyd")
 ```
 
 ### Exec Mode with Streaming
 
 ```kotlin
-// Stream output from a long-running command
+// Local streaming
 val session = TerminalSession.execSession("ping -c 5 google.com")
 session.use {
     it.output().collect { bytes ->
@@ -135,16 +144,27 @@ session.use {
     }
     println("Exit code: ${it.exitCode}")
 }
+
+// Daemon streaming (root)
+val session = TerminalSession.execSession("dmesg -w", socketPath = "@ftyd")
 ```
 
 ### Send Signals to Exec Sessions
 
 ```kotlin
-// Send signals to a running exec session (e.g., interrupt a long command)
 val session = TerminalSession.execSession("sleep 60")
 session.sendSignal(2)   // SIGINT — interrupt
 session.sendSignal(15)  // SIGTERM — graceful terminate
 session.sendSignal(9)   // SIGKILL — force kill
+```
+
+### Custom Shell
+
+All session methods accept a `shell` parameter (default: `"/system/bin/sh"`):
+
+```kotlin
+val session = TerminalSession.create(shell = "/system/bin/sh")
+val result = TerminalSession.exec("whoami", shell = "/system/bin/sh")
 ```
 
 ## Architecture
@@ -158,21 +178,25 @@ session.sendSignal(9)   // SIGKILL — force kill
         │                                  fork/exec
         │                                       │
         │  ┌─────────────┐               /system/bin/sh
+        ├─▶│  Local exec  │ (exec mode, no root)
+        │  │  fork + pipes │──── pipes ──── sh -c "command" (app UID)
+        │  └─────────────┘
+        │  ┌─────────────┐
         ├─▶│  ftyd daemon │ (interactive daemon mode)
         │  │  Unix socket  │──── PTY ──── /system/bin/sh (as root)
         │  └─────────────┘
         │  ┌─────────────┐
-        └─▶│  ftyd daemon │ (exec mode)
+        └─▶│  ftyd daemon │ (daemon exec mode)
            │  Unix socket  │──── pipes ──── sh -c "command" (as root)
            └─────────────┘
 ```
 
 - **Kotlin layer**: `TerminalSession` — clean, lifecycle-aware API with `ReentrantReadWriteLock` for thread safety
 - **JNI layer**: Compiled directly into `libterm.so` via Android NDK CMake
-- **Native layer**: Pure C (~430 lines), no Go/Rust runtime overhead
+- **Native layer**: Pure C, no Go/Rust runtime overhead
 - **PTY**: Manual `posix_openpt` + `ptsname_r` (Android Bionic lacks `openpty`)
 - **Daemon**: `ftyd` — root PTY broker with heap-allocated sessions, atomic flags, shared protocol
-- **Exec mode**: Pipe-based I/O (no PTY), clean output without echo/prompts, exit code capture
+- **Exec mode**: Pipe-based I/O (no PTY), clean output without echo/prompts, exit code capture. Local exec uses fork+pipes; daemon exec routes through ftyd.
 
 ### Daemon Protocol
 
