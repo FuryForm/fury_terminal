@@ -112,8 +112,8 @@ session.resize(rows = 40, cols = 120)
 ### Send Signals
 
 ```kotlin
-session.sendSignal(2)   // SIGINT (Ctrl+C)
-session.sendSignal(20)  // SIGTSTP (Ctrl+Z)
+session.sendSignal(TerminalSession.SIGINT)    // Ctrl+C
+session.sendSignal(TerminalSession.SIGTSTP)   // Ctrl+Z
 ```
 
 ### Exec Mode (One-Shot Command)
@@ -154,18 +154,20 @@ val session = TerminalSession.execSession("dmesg -w", socketPath = "@ftyd")
 
 ```kotlin
 val session = TerminalSession.execSession("sleep 60")
-session.sendSignal(2)   // SIGINT — interrupt
-session.sendSignal(15)  // SIGTERM — graceful terminate
-session.sendSignal(9)   // SIGKILL — force kill
+session.sendSignal(TerminalSession.SIGINT)    // interrupt
+session.sendSignal(TerminalSession.SIGTERM)   // graceful terminate
+session.sendSignal(TerminalSession.SIGKILL)   // force kill
 ```
 
 ### Custom Shell
 
-All session methods accept a `shell` parameter (default: `"/system/bin/sh"`):
+All session methods accept a `shell` parameter (default: `"/system/bin/sh"`).
+Both full paths and short names (PATH-searched) are supported:
 
 ```kotlin
-val session = TerminalSession.create(shell = "/system/bin/sh")
-val result = TerminalSession.exec("whoami", shell = "/system/bin/sh")
+val session = TerminalSession.create(shell = "su")              // short name (searches PATH)
+val session = TerminalSession.create(shell = "/product/bin/su")  // full path also works
+val result = TerminalSession.exec("whoami", shell = "su")
 ```
 
 ## Architecture

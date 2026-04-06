@@ -651,7 +651,7 @@ static void handle_exec(int client_fd, const char *shell_path,
         setenv("HOME", "/data/local/tmp", 0);
 
         /* Use sh -c to support pipes, redirects, etc. */
-        execl(exec_shell, exec_shell, "-c", command, (char *)NULL);
+        execlp(exec_shell, exec_shell, "-c", command, (char *)NULL);
         _exit(127);
     }
 
@@ -943,8 +943,8 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    /* Verify shell exists */
-    if (access(shell_path, X_OK) != 0) {
+    /* Verify shell exists (only for explicit paths; short names are PATH-searched) */
+    if (strchr(shell_path, '/') != NULL && access(shell_path, X_OK) != 0) {
         LOGE("Shell not found or not executable: %s\n", shell_path);
         return 1;
     }

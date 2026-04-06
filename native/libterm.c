@@ -399,7 +399,7 @@ Java_com_furyform_terminal_NativePTY_nativeStartLocalExecSession(
         setenv("HOME", "/data/local/tmp", 0);
 
         /* Use sh -c to support pipes, redirects, etc. */
-        execl(shell, shell, "-c", cmd, (char *)NULL);
+        execlp(shell, shell, "-c", cmd, (char *)NULL);
         _exit(127);
     }
 

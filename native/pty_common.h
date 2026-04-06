@@ -96,7 +96,7 @@ static int do_fork_exec(int slave_fd, const char *shell_path) {
         setenv("TERM", "xterm-256color", 1);
         setenv("HOME", "/data/local/tmp", 0);
         setenv("PATH", "/product/bin:/sbin:/vendor/bin:/system/sbin:/system/bin:/system/xbin:/system/bin/applets", 1);
-        execl(shell_path, shell_path, (char *)NULL);
+        execlp(shell_path, shell_path, (char *)NULL);
         _exit(127);
     }
     return (int)pid;

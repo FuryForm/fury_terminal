@@ -203,12 +203,13 @@ class TerminalSession private constructor(
     /**
      * Send a POSIX signal to the shell process.
      *
-     * Common signals:
-     * - `2`  = SIGINT  (Ctrl+C — interrupt current command)
-     * - `20` = SIGTSTP (Ctrl+Z — suspend current command)
-     * - `15` = SIGTERM (graceful terminate)
+     * Use the signal constants defined in [TerminalSession.Companion]:
+     * - [SIGINT]  — Ctrl+C (interrupt current command)
+     * - [SIGTSTP] — Ctrl+Z (suspend current command)
+     * - [SIGTERM] — graceful terminate
+     * - [SIGKILL] — force kill (cannot be caught)
      *
-     * Example: `session.sendSignal(2)` is equivalent to pressing Ctrl+C.
+     * Example: `session.sendSignal(TerminalSession.SIGINT)`
      */
     fun sendSignal(signum: Int) {
         lock.read {
@@ -262,6 +263,24 @@ class TerminalSession private constructor(
     }
 
     companion object {
+        // =================== Signal Constants ===================
+
+        /** Hangup — sent when terminal is closed. */
+        const val SIGHUP = 1
+        /** Interrupt — equivalent to Ctrl+C. */
+        const val SIGINT = 2
+        /** Quit — equivalent to Ctrl+\. Produces core dump. */
+        const val SIGQUIT = 3
+        /** Kill — cannot be caught or ignored. Force-terminates the process. */
+        const val SIGKILL = 9
+        /** Terminate — graceful termination request. */
+        const val SIGTERM = 15
+        /** Continue — resume a stopped process. */
+        const val SIGCONT = 18
+        /** Stop — equivalent to Ctrl+Z. Suspends the process. */
+        const val SIGTSTP = 20
+        /** Window change — notify process of terminal resize. */
+        const val SIGWINCH = 28
         /**
          * Create a local PTY session. The shell runs as the app's own UID.
          *
