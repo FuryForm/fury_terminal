@@ -286,6 +286,7 @@ Java_com_furyform_terminal_NativePTY_nativeStartPTY(
     const char **env_pairs = NULL;
     jstring *env_jstrings = NULL;
     if (env_count > 0) {
+        if (env_count > 16) (*env)->EnsureLocalCapacity(env, env_count);
         env_pairs = (const char **)malloc(sizeof(char *) * (env_count + 1));
         env_jstrings = (jstring *)malloc(sizeof(jstring) * env_count);
         if (env_pairs && env_jstrings) {
@@ -349,24 +350,102 @@ Java_com_furyform_terminal_NativePTY_nativeStartPTY(
 
 JNIEXPORT jint JNICALL
 Java_com_furyform_terminal_NativePTY_nativeStartDaemonSession(
-        JNIEnv *env, jobject thiz, jstring jSocketPath, jint rows, jint cols, jstring jShell) {
+        JNIEnv *env, jobject thiz, jstring jSocketPath, jint rows, jint cols, jstring jShell,
+        jobjectArray jEnvVars, jstring jCwd) {
     const char *path = (*env)->GetStringUTFChars(env, jSocketPath, NULL);
     int fd = ftyd_connect(path);
     (*env)->ReleaseStringUTFChars(env, jSocketPath, path);
     if (fd < 0) return -1;
 
-    /* Send initial RESIZE so daemon knows terminal dimensions and spawns the shell.
-     * If a custom shell is specified, prepend it as: shell\0 + RESIZE data.
-     * Actually, for interactive mode the daemon uses its -S flag for the shell.
-     * We send RESIZE with an extended payload: [rows:2][cols:2][shell_path...] if shell != default.
-     * But that changes the protocol — let's keep interactive simple and use daemon's -S flag.
-     * Custom shell for interactive daemon sessions would need a new message type. */
-    uint8_t resize_data[4];
-    resize_data[0] = (uint8_t)((int)rows >> 8);
-    resize_data[1] = (uint8_t)((int)rows);
-    resize_data[2] = (uint8_t)((int)cols >> 8);
-    resize_data[3] = (uint8_t)((int)cols);
-    if (proto_send(fd, FTYD_RESIZE, resize_data, 4) < 0) { close(fd); return -1; }
+    const char *shell = (*env)->GetStringUTFChars(env, jShell, NULL);
+    const char *cwd = jCwd ? (*env)->GetStringUTFChars(env, jCwd, NULL) : NULL;
+
+    /* Convert Java String[] env vars */
+    int env_count = jEnvVars ? (*env)->GetArrayLength(env, jEnvVars) : 0;
+    const char **env_strs = NULL;
+    jstring *env_jstrings = NULL;
+    if (env_count > 0) {
+        if (env_count > 16) (*env)->EnsureLocalCapacity(env, env_count);
+        env_strs = (const char **)malloc(sizeof(char *) * env_count);
+        env_jstrings = (jstring *)malloc(sizeof(jstring) * env_count);
+        if (env_strs && env_jstrings) {
+            for (int i = 0; i < env_count; i++) {
+                env_jstrings[i] = (jstring)(*env)->GetObjectArrayElement(env, jEnvVars, i);
+                env_strs[i] = (*env)->GetStringUTFChars(env, env_jstrings[i], NULL);
+            }
+        } else {
+            free(env_strs); free(env_jstrings);
+            env_strs = NULL; env_jstrings = NULL;
+            env_count = 0;
+        }
+    }
+
+    /* Build extended RESIZE payload: [rows:2][cols:2][shell\0cwd\0env1\0env2\0...] */
+    int has_extended = (shell[0] != '\0') || (cwd && cwd[0] != '\0') || env_count > 0;
+    uint32_t payload_len = 4; /* rows + cols */
+
+    if (has_extended) {
+        uint32_t shell_len = (uint32_t)strlen(shell);
+        uint32_t cwd_len = cwd ? (uint32_t)strlen(cwd) : 0;
+        payload_len += shell_len + 1 + cwd_len + 1; /* shell\0cwd\0 */
+        for (int i = 0; i < env_count; i++) {
+            payload_len += (uint32_t)strlen(env_strs[i]) + 1; /* envN\0 */
+        }
+    }
+
+    uint8_t *payload = (uint8_t *)malloc(payload_len);
+    if (!payload) {
+        (*env)->ReleaseStringUTFChars(env, jShell, shell);
+        if (cwd) (*env)->ReleaseStringUTFChars(env, jCwd, cwd);
+        if (env_strs) {
+            for (int i = 0; i < env_count; i++)
+                (*env)->ReleaseStringUTFChars(env, env_jstrings[i], env_strs[i]);
+            free(env_strs); free(env_jstrings);
+        }
+        close(fd);
+        return -1;
+    }
+
+    payload[0] = (uint8_t)((int)rows >> 8);
+    payload[1] = (uint8_t)((int)rows);
+    payload[2] = (uint8_t)((int)cols >> 8);
+    payload[3] = (uint8_t)((int)cols);
+
+    if (has_extended) {
+        uint32_t off = 4;
+        uint32_t shell_len = (uint32_t)strlen(shell);
+        memcpy(payload + off, shell, shell_len);
+        off += shell_len;
+        payload[off++] = '\0';
+
+        if (cwd) {
+            uint32_t cwd_len = (uint32_t)strlen(cwd);
+            memcpy(payload + off, cwd, cwd_len);
+            off += cwd_len;
+        }
+        payload[off++] = '\0';
+
+        for (int i = 0; i < env_count; i++) {
+            uint32_t elen = (uint32_t)strlen(env_strs[i]);
+            memcpy(payload + off, env_strs[i], elen);
+            off += elen;
+            payload[off++] = '\0';
+        }
+    }
+
+    int rc = proto_send(fd, FTYD_RESIZE, payload, payload_len);
+    free(payload);
+
+    /* Release JNI strings */
+    (*env)->ReleaseStringUTFChars(env, jShell, shell);
+    if (cwd) (*env)->ReleaseStringUTFChars(env, jCwd, cwd);
+    if (env_strs) {
+        for (int i = 0; i < env_count; i++)
+            (*env)->ReleaseStringUTFChars(env, env_jstrings[i], env_strs[i]);
+        free(env_strs); free(env_jstrings);
+    }
+
+    if (rc < 0) { close(fd); return -1; }
 
     int id = store_daemon_session(fd);
     if (id < 0) { close(fd); return -1; }
@@ -375,33 +454,96 @@ Java_com_furyform_terminal_NativePTY_nativeStartDaemonSession(
 
 JNIEXPORT jint JNICALL
 Java_com_furyform_terminal_NativePTY_nativeStartExecSession(
-        JNIEnv *env, jobject thiz, jstring jSocketPath, jstring jCommand, jstring jShell) {
+        JNIEnv *env, jobject thiz, jstring jSocketPath, jstring jCommand, jstring jShell,
+        jobjectArray jEnvVars, jstring jCwd) {
     const char *path = (*env)->GetStringUTFChars(env, jSocketPath, NULL);
     int fd = ftyd_connect(path);
     (*env)->ReleaseStringUTFChars(env, jSocketPath, path);
     if (fd < 0) return -1;
 
-    /* Send EXEC message: payload = "shell\0command"
-     * If shell is empty, daemon uses its default (-S flag). */
     const char *cmd = (*env)->GetStringUTFChars(env, jCommand, NULL);
     const char *shell = (*env)->GetStringUTFChars(env, jShell, NULL);
+    const char *cwd = jCwd ? (*env)->GetStringUTFChars(env, jCwd, NULL) : NULL;
+
+    /* Convert Java String[] env vars */
+    int env_count = jEnvVars ? (*env)->GetArrayLength(env, jEnvVars) : 0;
+    const char **env_strs = NULL;
+    jstring *env_jstrings = NULL;
+    if (env_count > 0) {
+        if (env_count > 16) (*env)->EnsureLocalCapacity(env, env_count);
+        env_strs = (const char **)malloc(sizeof(char *) * env_count);
+        env_jstrings = (jstring *)malloc(sizeof(jstring) * env_count);
+        if (env_strs && env_jstrings) {
+            for (int i = 0; i < env_count; i++) {
+                env_jstrings[i] = (jstring)(*env)->GetObjectArrayElement(env, jEnvVars, i);
+                env_strs[i] = (*env)->GetStringUTFChars(env, env_jstrings[i], NULL);
+            }
+        } else {
+            free(env_strs); free(env_jstrings);
+            env_strs = NULL; env_jstrings = NULL;
+            env_count = 0;
+        }
+    }
+
+    /* Build EXEC payload: shell\0command[\0cwd[\0env1\0env2\0...]] */
     uint32_t shell_len = (uint32_t)strlen(shell);
     uint32_t cmd_len = (uint32_t)strlen(cmd);
+    uint32_t cwd_len = cwd ? (uint32_t)strlen(cwd) : 0;
     uint32_t payload_len = shell_len + 1 + cmd_len; /* shell\0command */
+
+    int has_cwd_or_env = (cwd && cwd[0] != '\0') || env_count > 0;
+    if (has_cwd_or_env) {
+        payload_len += 1 + cwd_len; /* \0cwd */
+        for (int i = 0; i < env_count; i++) {
+            payload_len += 1 + (uint32_t)strlen(env_strs[i]); /* \0envN */
+        }
+    }
+
     uint8_t *payload = (uint8_t *)malloc(payload_len);
     if (!payload) {
         (*env)->ReleaseStringUTFChars(env, jCommand, cmd);
         (*env)->ReleaseStringUTFChars(env, jShell, shell);
+        if (cwd) (*env)->ReleaseStringUTFChars(env, jCwd, cwd);
+        if (env_strs) {
+            for (int i = 0; i < env_count; i++)
+                (*env)->ReleaseStringUTFChars(env, env_jstrings[i], env_strs[i]);
+            free(env_strs); free(env_jstrings);
+        }
         close(fd);
         return -1;
     }
-    memcpy(payload, shell, shell_len);
-    payload[shell_len] = '\0';
-    memcpy(payload + shell_len + 1, cmd, cmd_len);
+
+    uint32_t off = 0;
+    memcpy(payload + off, shell, shell_len);
+    off += shell_len;
+    payload[off++] = '\0';
+    memcpy(payload + off, cmd, cmd_len);
+    off += cmd_len;
+
+    if (has_cwd_or_env) {
+        payload[off++] = '\0';
+        if (cwd) {
+            memcpy(payload + off, cwd, cwd_len);
+            off += cwd_len;
+        }
+        for (int i = 0; i < env_count; i++) {
+            payload[off++] = '\0';
+            uint32_t elen = (uint32_t)strlen(env_strs[i]);
+            memcpy(payload + off, env_strs[i], elen);
+            off += elen;
+        }
+    }
+
     int rc = proto_send(fd, FTYD_EXEC, payload, payload_len);
     free(payload);
     (*env)->ReleaseStringUTFChars(env, jCommand, cmd);
     (*env)->ReleaseStringUTFChars(env, jShell, shell);
+    if (cwd) (*env)->ReleaseStringUTFChars(env, jCwd, cwd);
+    if (env_strs) {
+        for (int i = 0; i < env_count; i++)
+            (*env)->ReleaseStringUTFChars(env, env_jstrings[i], env_strs[i]);
+        free(env_strs); free(env_jstrings);
+    }
     if (rc < 0) { close(fd); return -1; }
 
     int id = store_daemon_session(fd);
@@ -428,6 +570,7 @@ Java_com_furyform_terminal_NativePTY_nativeStartLocalExecSession(
     const char **env_pairs = NULL;
     jstring *env_jstrings = NULL;
     if (env_count > 0) {
+        if (env_count > 16) (*env)->EnsureLocalCapacity(env, env_count);
         env_pairs = (const char **)malloc(sizeof(char *) * (env_count + 1));
         env_jstrings = (jstring *)malloc(sizeof(jstring) * env_count);
         if (env_pairs && env_jstrings) {

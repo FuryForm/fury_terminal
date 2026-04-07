@@ -526,13 +526,13 @@ class NativePTYTest {
 
     @Test
     fun startExecSession_invalidSocket_returnsNegative() {
-        val id = NativePTY.nativeStartExecSession("@nonexistent_test_socket", "echo hi", "/system/bin/sh")
+        val id = NativePTY.nativeStartExecSession("@nonexistent_test_socket", "echo hi", "/system/bin/sh", null, null)
         assertTrue("Connecting to nonexistent socket should return -1, got $id", id < 0)
     }
 
     @Test
     fun startExecSession_validSocket() {
-        val id = NativePTY.nativeStartExecSession("@ftyd", "echo daemon_native", "/system/bin/sh")
+        val id = NativePTY.nativeStartExecSession("@ftyd", "echo daemon_native", "/system/bin/sh", null, null)
         if (id >= 0) {
             // Daemon is running — read and verify output
             val output = StringBuilder()
@@ -654,6 +654,133 @@ class NativePTYTest {
             output.append(String(data))
         }
         assertTrue(output.toString().contains("null_compat"))
+        NativePTY.nativeClose(id)
+    }
+
+    // =================== Daemon Env Vars + Working Directory (Native) ===================
+
+    @Test
+    fun startDaemonSession_withEnvVars() {
+        val id = NativePTY.nativeStartDaemonSession("@ftyd", 24, 80, "/system/bin/sh", arrayOf("FURY_DAEMON_ENV=daemon_env_val"), null)
+        if (id < 0) return // daemon not running
+
+        NativePTY.nativeWrite(id, "echo \$FURY_DAEMON_ENV\n".toByteArray())
+        Thread.sleep(1500)
+
+        val output = StringBuilder()
+        for (i in 0 until 8) {
+            val data = readWithTimeout(id, 1000) ?: break
+            output.append(String(data))
+            if (output.contains("daemon_env_val")) break
+        }
+        assertTrue(
+            "Output should contain 'daemon_env_val', got: ${output.take(200)}",
+            output.contains("daemon_env_val")
+        )
+        NativePTY.nativeClose(id)
+    }
+
+    @Test
+    fun startDaemonSession_withCwd() {
+        val id = NativePTY.nativeStartDaemonSession("@ftyd", 24, 80, "/system/bin/sh", null, "/data/local/tmp")
+        if (id < 0) return // daemon not running
+
+        NativePTY.nativeWrite(id, "pwd\n".toByteArray())
+        Thread.sleep(1500)
+
+        val output = StringBuilder()
+        for (i in 0 until 8) {
+            val data = readWithTimeout(id, 1000) ?: break
+            output.append(String(data))
+            if (output.contains("/data/local/tmp")) break
+        }
+        assertTrue(
+            "Output should contain '/data/local/tmp', got: ${output.take(200)}",
+            output.contains("/data/local/tmp")
+        )
+        NativePTY.nativeClose(id)
+    }
+
+    @Test
+    fun startDaemonSession_withEnvAndCwd() {
+        val id = NativePTY.nativeStartDaemonSession("@ftyd", 24, 80, "/system/bin/sh", arrayOf("FURY_DUAL=dual_val"), "/data/local/tmp")
+        if (id < 0) return // daemon not running
+
+        NativePTY.nativeWrite(id, "echo \$FURY_DUAL && pwd\n".toByteArray())
+        Thread.sleep(1500)
+
+        val output = StringBuilder()
+        for (i in 0 until 8) {
+            val data = readWithTimeout(id, 2000) ?: break
+            output.append(String(data))
+            if (output.contains("dual_val") && output.contains("/data/local/tmp")) break
+        }
+        assertTrue(
+            "Output should contain 'dual_val', got: ${output.take(200)}",
+            output.contains("dual_val")
+        )
+        assertTrue(
+            "Output should contain '/data/local/tmp', got: ${output.take(200)}",
+            output.contains("/data/local/tmp")
+        )
+        NativePTY.nativeClose(id)
+    }
+
+    @Test
+    fun startExecSession_withEnvVars() {
+        val id = NativePTY.nativeStartExecSession("@ftyd", "echo \$EXEC_DAEMON_VAR", "/system/bin/sh", arrayOf("EXEC_DAEMON_VAR=daemon_exec_val"), null)
+        if (id < 0) return // daemon not running
+
+        val output = StringBuilder()
+        for (i in 0 until 10) {
+            val data = readWithTimeout(id, 2000) ?: break
+            output.append(String(data))
+            if (output.contains("daemon_exec_val")) break
+        }
+        assertTrue(
+            "Output should contain 'daemon_exec_val', got: ${output.take(200)}",
+            output.contains("daemon_exec_val")
+        )
+        NativePTY.nativeClose(id)
+    }
+
+    @Test
+    fun startExecSession_withCwd() {
+        val id = NativePTY.nativeStartExecSession("@ftyd", "pwd", "/system/bin/sh", null, "/data/local/tmp")
+        if (id < 0) return // daemon not running
+
+        val output = StringBuilder()
+        for (i in 0 until 10) {
+            val data = readWithTimeout(id, 2000) ?: break
+            output.append(String(data))
+            if (output.contains("/data/local/tmp")) break
+        }
+        assertTrue(
+            "Output should contain '/data/local/tmp', got: ${output.take(200)}",
+            output.contains("/data/local/tmp")
+        )
+        NativePTY.nativeClose(id)
+    }
+
+    @Test
+    fun startExecSession_withEnvAndCwd() {
+        val id = NativePTY.nativeStartExecSession("@ftyd", "echo \$EXEC_DUAL && pwd", "/system/bin/sh", arrayOf("EXEC_DUAL=exec_dual_val"), "/data/local/tmp")
+        if (id < 0) return // daemon not running
+
+        val output = StringBuilder()
+        for (i in 0 until 10) {
+            val data = readWithTimeout(id, 2000) ?: break
+            output.append(String(data))
+            if (output.contains("exec_dual_val") && output.contains("/data/local/tmp")) break
+        }
+        assertTrue(
+            "Output should contain 'exec_dual_val', got: ${output.take(200)}",
+            output.contains("exec_dual_val")
+        )
+        assertTrue(
+            "Output should contain '/data/local/tmp', got: ${output.take(200)}",
+            output.contains("/data/local/tmp")
+        )
         NativePTY.nativeClose(id)
     }
 }

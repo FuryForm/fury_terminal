@@ -32,6 +32,7 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <sys/stat.h>
+#include <alloca.h>
 
 #define DEFAULT_SOCKET_PATH "@ftyd"
 #define DEFAULT_SHELL       "/system/bin/sh"
@@ -349,7 +350,56 @@ static void handle_client(int client_fd, const char *shell_path) {
     if (rows <= 0) rows = 24;
     if (cols <= 0) cols = 80;
 
-    LOGI("Client fd=%d: initial size %dx%d\n", client_fd, rows, cols);
+    /* Parse extended RESIZE payload: bytes 4+ contain NUL-separated fields:
+     * shell, cwd, env vars (KEY=VALUE).  If msg_len == 4, use defaults. */
+    const char *client_shell = shell_path;
+    const char *client_cwd = NULL;
+    const char **client_env = NULL;
+    int client_env_count = 0;
+    char extended_buf[4096]; /* copy for safe NUL-terminated parsing */
+
+    if (msg_len > 4) {
+        uint32_t ext_len = msg_len - 4;
+        if (ext_len >= sizeof(extended_buf)) {
+            LOGE("Client fd=%d: extended RESIZE payload too large (%u bytes), truncating\n",
+                 client_fd, ext_len);
+            ext_len = sizeof(extended_buf) - 1;
+        }
+        memcpy(extended_buf, msg_buf + 4, ext_len);
+        extended_buf[ext_len] = '\0';
+
+        /* Split into NUL-separated fields */
+        const char *fields[128];
+        int field_count = 0;
+        const char *p = extended_buf;
+        const char *end = extended_buf + ext_len;
+        while (p < end && field_count < 128) {
+            fields[field_count++] = p;
+            p += strlen(p) + 1;
+        }
+
+        /* Field 0: shell (if non-empty, overrides daemon default) */
+        if (field_count >= 1 && fields[0][0] != '\0') {
+            client_shell = fields[0];
+        }
+        /* Field 1: cwd */
+        if (field_count >= 2 && fields[1][0] != '\0') {
+            client_cwd = fields[1];
+        }
+        /* Fields 2+: env vars (KEY=VALUE) */
+        if (field_count >= 3) {
+            client_env_count = field_count - 2;
+            client_env = (const char **)alloca(sizeof(const char *) * (client_env_count + 1));
+            for (int i = 0; i < client_env_count; i++) {
+                client_env[i] = fields[i + 2];
+            }
+            client_env[client_env_count] = NULL;
+        }
+    }
+
+    LOGI("Client fd=%d: initial size %dx%d shell='%s' cwd='%s' env_count=%d\n",
+         client_fd, rows, cols, client_shell,
+         client_cwd ? client_cwd : "(default)", client_env_count);
 
     /* Step 2: Open PTY and spawn shell */
     int master, slave;
@@ -362,7 +412,7 @@ static void handle_client(int client_fd, const char *shell_path) {
 
     set_winsize(master, rows, cols);
 
-    int shell_pid = do_fork_exec(slave, shell_path, NULL, NULL);
+    int shell_pid = do_fork_exec(slave, client_shell, client_env, client_cwd);
     close(slave); /* parent doesn't need slave */
 
     if (shell_pid < 0) {
@@ -557,44 +607,75 @@ done:
  */
 static void handle_exec(int client_fd, const char *shell_path,
                         const uint8_t *cmd_buf, uint32_t cmd_len) {
-    /* Parse payload: "shell\0command" or just "command" (backward compat).
-     * If a NUL byte is found, everything before it is the shell path,
-     * everything after is the command.  Empty shell = use daemon default. */
     const char *exec_shell = shell_path;
-    const uint8_t *cmd_start = cmd_buf;
-    uint32_t cmd_actual_len = cmd_len;
-    char client_shell[256];
+    const char *exec_cwd = NULL;
+    const char **exec_env = NULL;
+    int exec_env_count = 0;
 
-    const uint8_t *nul = (const uint8_t *)memchr(cmd_buf, '\0', cmd_len);
-    if (nul != NULL && nul < cmd_buf + cmd_len) {
-        /* Found separator: payload is shell\0command */
-        uint32_t shell_len = (uint32_t)(nul - cmd_buf);
-        if (shell_len > 0) {
-            /* Client specified a shell — use it (it's already null-terminated at nul) */
-            if (shell_len < sizeof(client_shell)) {
-                memcpy(client_shell, cmd_buf, shell_len);
-                client_shell[shell_len] = '\0';
-                exec_shell = client_shell;
-            }
-            /* else: shell path too long, fall back to daemon default */
+    /* Parse NUL-separated fields from payload.
+     * Fields: shell, command, [cwd, [env1, env2, ...]]
+     * Backward compat: if only 1 field (no NUL), treat as command with daemon default shell.
+     *
+     * Copy to a local buffer and ensure NUL-termination so strlen() is safe
+     * even when the last field has no trailing NUL in the wire payload. */
+    uint8_t local_buf[BUF_SIZE];
+    if (cmd_len >= sizeof(local_buf)) cmd_len = sizeof(local_buf) - 1;
+    memcpy(local_buf, cmd_buf, cmd_len);
+    local_buf[cmd_len] = '\0';
+
+    const char *fields[128];
+    int field_count = 0;
+    {
+        const uint8_t *p = local_buf;
+        const uint8_t *end = local_buf + cmd_len;
+        while (p < end && field_count < 128) {
+            fields[field_count++] = (const char *)p;
+            p += strlen((const char *)p) + 1;
         }
-        /* Command starts after the NUL separator */
-        cmd_start = nul + 1;
-        cmd_actual_len = cmd_len - shell_len - 1;
     }
 
-    /* Null-terminate the command string */
-    char *command = (char *)malloc(cmd_actual_len + 1);
+    const char *command_str;
+    if (field_count >= 2) {
+        /* shell\0command[\0cwd[\0env...]] */
+        if (fields[0][0] != '\0') {
+            exec_shell = fields[0];
+        }
+        command_str = fields[1];
+        if (field_count >= 3 && fields[2][0] != '\0') {
+            exec_cwd = fields[2];
+        }
+        if (field_count >= 4) {
+            exec_env_count = field_count - 3;
+            exec_env = (const char **)alloca(sizeof(const char *) * (exec_env_count + 1));
+            for (int i = 0; i < exec_env_count; i++) {
+                exec_env[i] = fields[i + 3];
+            }
+            exec_env[exec_env_count] = NULL;
+        }
+    } else if (field_count == 1) {
+        /* Just command, no shell prefix (backward compat) */
+        command_str = fields[0];
+    } else {
+        LOGE("Client fd=%d: empty EXEC payload\n", client_fd);
+        proto_send(client_fd, FTYD_CLOSE, NULL, 0);
+        close(client_fd);
+        return;
+    }
+
+    /* Copy command to mutable null-terminated string */
+    size_t command_len = strlen(command_str);
+    char *command = (char *)malloc(command_len + 1);
     if (!command) {
         LOGE("Client fd=%d: malloc failed for exec command\n", client_fd);
         proto_send(client_fd, FTYD_CLOSE, NULL, 0);
         close(client_fd);
         return;
     }
-    memcpy(command, cmd_start, cmd_actual_len);
-    command[cmd_actual_len] = '\0';
+    memcpy(command, command_str, command_len + 1);
 
-    LOGI("Client fd=%d: EXEC shell='%s' cmd='%s'\n", client_fd, exec_shell, command);
+    LOGI("Client fd=%d: EXEC shell='%s' cmd='%s' cwd='%s' env_count=%d\n",
+         client_fd, exec_shell, command,
+         exec_cwd ? exec_cwd : "(default)", exec_env_count);
 
     /* Create pipes: stdout_pipe for stdout+stderr, stdin_pipe for stdin */
     int stdout_pipe[2]; /* [0]=read, [1]=write */
@@ -653,9 +734,30 @@ static void handle_exec(int client_fd, const char *shell_path,
         if (maxfd < 0) maxfd = 256;
         for (int fd = 3; fd < maxfd; fd++) close(fd);
 
-        /* Set environment */
+        /* Change working directory if specified (best-effort; ignore failure) */
+        if (exec_cwd && exec_cwd[0] != '\0') {
+            chdir(exec_cwd);
+        }
+
+        /* Set default environment */
         setenv("PATH", "/product/bin:/sbin:/vendor/bin:/system/sbin:/system/bin:/system/xbin:/system/bin/applets", 1);
         setenv("HOME", "/data/local/tmp", 0);
+
+        /* Apply custom environment variables */
+        if (exec_env) {
+            for (int i = 0; exec_env[i] != NULL; i++) {
+                const char *eq = strchr(exec_env[i], '=');
+                if (eq && eq != exec_env[i]) {
+                    size_t key_len = (size_t)(eq - exec_env[i]);
+                    char key[256];
+                    if (key_len < sizeof(key)) {
+                        memcpy(key, exec_env[i], key_len);
+                        key[key_len] = '\0';
+                        setenv(key, eq + 1, 1);
+                    }
+                }
+            }
+        }
 
         /* Use sh -c to support pipes, redirects, etc. */
         execlp(exec_shell, exec_shell, "-c", command, (char *)NULL);

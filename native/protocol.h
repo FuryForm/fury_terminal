@@ -23,6 +23,25 @@
 #define FTYD_EXEC      0x05  /* Client→Server: execute command (payload = command string) */
 #define FTYD_EXIT_CODE 0x06  /* Server→Client: process exited (payload = 4-byte int32 BE exit code) */
 
+/*
+ * Extended payload formats:
+ *
+ * FTYD_RESIZE (interactive session, initial message only):
+ *   Basic:    [rows:2 BE][cols:2 BE]  (4 bytes)
+ *   Extended: [rows:2 BE][cols:2 BE][shell\0cwd\0KEY1=VAL1\0KEY2=VAL2\0...]
+ *   If msg_len == 4: old behavior (daemon default shell, no env, no cwd)
+ *   If msg_len > 4:  bytes 4+ are NUL-separated fields: shell, cwd, env vars
+ *   Subsequent RESIZE during session: always 4 bytes (rows+cols only)
+ *
+ * FTYD_EXEC (exec session):
+ *   Basic:    shell\0command  (2 NUL-separated fields)
+ *   Extended: shell\0command\0cwd\0KEY1=VAL1\0KEY2=VAL2\0...
+ *   Field count by NUL separators:
+ *     2 fields: shell + command (backward compatible)
+ *     3 fields: shell + command + cwd
+ *     4+ fields: shell + command + cwd + env vars
+ */
+
 /** Maximum allowed message payload (1 MB). Prevents DoS via huge length fields. */
 #define FTYD_MAX_MSG_LEN (1024 * 1024)
 

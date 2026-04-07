@@ -55,9 +55,11 @@ internal object NativePTY {
      * @param rows terminal height in rows
      * @param cols terminal width in cols
      * @param shell the shell binary to launch (e.g. "/system/bin/sh")
+     * @param envVars array of "KEY=VALUE" strings for child environment (null for defaults)
+     * @param cwd working directory for the child process (null for default)
      * @return session ID >= 0, or -1 on failure (daemon not running or refused connection).
      */
-    external fun nativeStartDaemonSession(socketPath: String, rows: Int, cols: Int, shell: String): Int
+    external fun nativeStartDaemonSession(socketPath: String, rows: Int, cols: Int, shell: String, envVars: Array<String>?, cwd: String?): Int
 
     /**
      * Connect to a ftyd daemon and execute a single command.
@@ -67,9 +69,11 @@ internal object NativePTY {
      * @param socketPath path to the daemon socket. Prefix with '@' for abstract socket.
      * @param command the shell command to execute (passed to sh -c).
      * @param shell the shell binary the daemon should use. Empty string means the daemon's default.
+     * @param envVars array of "KEY=VALUE" strings for child environment (null for defaults)
+     * @param cwd working directory for the child process (null for default)
      * @return session ID >= 0, or -1 on failure.
      */
-    external fun nativeStartExecSession(socketPath: String, command: String, shell: String): Int
+    external fun nativeStartExecSession(socketPath: String, command: String, shell: String, envVars: Array<String>?, cwd: String?): Int
 
     /** Start a local exec session (fork+pipes, no daemon). Returns session ID >= 0, or -1 on failure.
      *

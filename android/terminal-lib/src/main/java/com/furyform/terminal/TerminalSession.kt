@@ -85,8 +85,6 @@ sealed interface SessionState {
  *   not reach the actual command. Magisk's `su` delegates to `magiskd`, which spawns
  *   processes in a separate process tree. Use the daemon path ([createDaemon], or
  *   `socketPath = "@ftyd"`) for root sessions that need signal support.
- * - **Env vars / cwd + daemon exec:** The [env] and [cwd] parameters are only supported
- *   for local sessions. Daemon exec sessions ignore them (the daemon's environment applies).
  *
  * This class is thread-safe. The native layer uses mutex-protected session management.
  */
@@ -429,6 +427,8 @@ class TerminalSession private constructor(
          * @param rows terminal height in rows (default 24)
          * @param cols terminal width in cols (default 80)
          * @param shell the shell binary the daemon should launch (default: "/system/bin/sh")
+         * @param env custom environment variables for the shell process (default: null, uses daemon defaults)
+         * @param cwd working directory for the shell process (default: null, uses daemon default)
          * @throws DaemonConnectionException if the daemon is not running or refused the connection
          */
         @JvmStatic
@@ -437,10 +437,12 @@ class TerminalSession private constructor(
             socketPath: String = "@ftyd",
             rows: Int = 24,
             cols: Int = 80,
-            shell: String = "/system/bin/sh"
+            shell: String = "/system/bin/sh",
+            env: Map<String, String>? = null,
+            cwd: String? = null
         ): TerminalSession {
             NativePTY.ensureLoaded()
-            val id = NativePTY.nativeStartDaemonSession(socketPath, rows, cols, shell)
+            val id = NativePTY.nativeStartDaemonSession(socketPath, rows, cols, shell, envToArray(env), cwd)
             if (id < 0) throw DaemonConnectionException(socketPath)
             return TerminalSession(id)
         }
@@ -467,8 +469,8 @@ class TerminalSession private constructor(
          * @param command the shell command to execute (passed to `shell -c`)
          * @param socketPath daemon socket path, or null for local exec (default: null)
          * @param shell the shell binary to use (default: "/system/bin/sh")
-         * @param env custom environment variables (local exec only; ignored for daemon exec)
-         * @param cwd working directory (local exec only; ignored for daemon exec)
+         * @param env custom environment variables for the shell process (default: null, uses system/daemon defaults)
+         * @param cwd working directory for the shell process (default: null, uses system/daemon default)
          * @return [ExecResult] with the complete output and exit code
          * @throws NativeException if local fork fails
          * @throws DaemonConnectionException if the daemon is not running
@@ -520,8 +522,8 @@ class TerminalSession private constructor(
          * @param command the shell command to execute (passed to `shell -c`)
          * @param socketPath daemon socket path, or null for local exec (default: null)
          * @param shell the shell binary to use (default: "/system/bin/sh")
-         * @param env custom environment variables (local exec only; ignored for daemon exec)
-         * @param cwd working directory (local exec only; ignored for daemon exec)
+         * @param env custom environment variables for the shell process (default: null, uses system/daemon defaults)
+         * @param cwd working directory for the shell process (default: null, uses system/daemon default)
          * @throws NativeException if local fork fails
          * @throws DaemonConnectionException if the daemon is not running
          */
@@ -536,7 +538,7 @@ class TerminalSession private constructor(
         ): TerminalSession {
             NativePTY.ensureLoaded()
             if (socketPath != null) {
-                val id = NativePTY.nativeStartExecSession(socketPath, command, shell)
+                val id = NativePTY.nativeStartExecSession(socketPath, command, shell, envToArray(env), cwd)
                 if (id < 0) throw DaemonConnectionException(socketPath, "Failed to connect to ftyd at $socketPath for exec — is the daemon running?")
                 return TerminalSession(id)
             } else {

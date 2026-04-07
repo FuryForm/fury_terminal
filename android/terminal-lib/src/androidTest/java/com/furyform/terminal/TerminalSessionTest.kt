@@ -1060,6 +1060,195 @@ class TerminalSessionTest {
         }
     }
 
+    // =================== Daemon Env Vars + Working Directory ===================
+
+    @Test
+    fun testCreateDaemonWithEnvVars() {
+        val session = try {
+            TerminalSession.createDaemon(
+                socketPath = "@ftyd",
+                env = mapOf("FURY_DAEMON_TEST" to "daemon_env_val")
+            )
+        } catch (_: DaemonConnectionException) {
+            return // Daemon not running
+        }
+
+        session.use {
+            it.write("echo \$FURY_DAEMON_TEST\n")
+            Thread.sleep(1500)
+            val output = StringBuilder()
+            for (i in 0 until 8) {
+                val data = readWithTimeout(it, 1000) ?: break
+                output.append(String(data))
+                if (output.contains("daemon_env_val")) break
+            }
+            assertTrue(
+                "Daemon output should contain 'daemon_env_val', got: ${output.take(200)}",
+                output.contains("daemon_env_val")
+            )
+        }
+    }
+
+    @Test
+    fun testCreateDaemonWithCwd() {
+        val session = try {
+            TerminalSession.createDaemon(socketPath = "@ftyd", cwd = "/data/local/tmp")
+        } catch (_: DaemonConnectionException) {
+            return
+        }
+
+        session.use {
+            it.write("pwd\n")
+            Thread.sleep(1500)
+            val output = StringBuilder()
+            for (i in 0 until 8) {
+                val data = readWithTimeout(it, 1000) ?: break
+                output.append(String(data))
+                if (output.contains("/data/local/tmp")) break
+            }
+            assertTrue(
+                "Daemon cwd should be /data/local/tmp, got: ${output.take(200)}",
+                output.contains("/data/local/tmp")
+            )
+        }
+    }
+
+    @Test
+    fun testCreateDaemonWithEnvAndCwd() {
+        val session = try {
+            TerminalSession.createDaemon(
+                socketPath = "@ftyd",
+                env = mapOf("FURY_DAEMON_DUAL" to "dual_val"),
+                cwd = "/data/local/tmp"
+            )
+        } catch (_: DaemonConnectionException) {
+            return
+        }
+
+        session.use {
+            it.write("echo \$FURY_DAEMON_DUAL && pwd\n")
+            Thread.sleep(1500)
+            val output = StringBuilder()
+            for (i in 0 until 8) {
+                val data = readWithTimeout(it, 1000) ?: break
+                output.append(String(data))
+                if (output.contains("dual_val") && output.contains("/data/local/tmp")) break
+            }
+            assertTrue(
+                "Should contain env var, got: ${output.take(200)}",
+                output.contains("dual_val")
+            )
+            assertTrue(
+                "Should contain cwd, got: ${output.take(200)}",
+                output.contains("/data/local/tmp")
+            )
+        }
+    }
+
+    @Test
+    fun testExecDaemonWithEnvVars() {
+        val result = try {
+            TerminalSession.exec(
+                "echo \$DAEMON_EXEC_VAR",
+                socketPath = "@ftyd",
+                env = mapOf("DAEMON_EXEC_VAR" to "daemon_exec_env_123")
+            )
+        } catch (_: DaemonConnectionException) {
+            return
+        }
+        assertTrue(
+            "Daemon exec should have env var, got: ${result.output.take(200)}",
+            result.output.contains("daemon_exec_env_123")
+        )
+    }
+
+    @Test
+    fun testExecDaemonWithCwd() {
+        val result = try {
+            TerminalSession.exec("pwd", socketPath = "@ftyd", cwd = "/data/local/tmp")
+        } catch (_: DaemonConnectionException) {
+            return
+        }
+        assertTrue(
+            "Daemon exec cwd should be /data/local/tmp, got: ${result.output.take(200)}",
+            result.output.trim().contains("/data/local/tmp")
+        )
+    }
+
+    @Test
+    fun testExecDaemonWithEnvAndCwd() {
+        val result = try {
+            TerminalSession.exec(
+                "echo \$DAEMON_DUAL_VAR && pwd",
+                socketPath = "@ftyd",
+                env = mapOf("DAEMON_DUAL_VAR" to "daemon_dual_val"),
+                cwd = "/data/local/tmp"
+            )
+        } catch (_: DaemonConnectionException) {
+            return
+        }
+        assertTrue(result.output.contains("daemon_dual_val"))
+        assertTrue(result.output.contains("/data/local/tmp"))
+    }
+
+    @Test
+    fun testExecSessionDaemonWithEnvAndCwd() {
+        val session = try {
+            TerminalSession.execSession(
+                "echo \$SESS_DAEMON_VAR && pwd",
+                socketPath = "@ftyd",
+                env = mapOf("SESS_DAEMON_VAR" to "sess_daemon_val"),
+                cwd = "/data/local/tmp"
+            )
+        } catch (_: DaemonConnectionException) {
+            return
+        }
+
+        session.use {
+            val output = it.readAll()
+            assertTrue(
+                "Session daemon output should have env var, got: ${output.take(200)}",
+                output.contains("sess_daemon_val")
+            )
+            assertTrue(
+                "Session daemon output should have cwd, got: ${output.take(200)}",
+                output.contains("/data/local/tmp")
+            )
+        }
+    }
+
+    @Test
+    fun testExecAsyncDaemonWithEnvAndCwd() = runBlocking {
+        val result = try {
+            TerminalSession.execAsync(
+                "echo \$ASYNC_DAEMON_VAR && pwd",
+                socketPath = "@ftyd",
+                env = mapOf("ASYNC_DAEMON_VAR" to "async_daemon_val"),
+                cwd = "/data/local/tmp"
+            )
+        } catch (_: DaemonConnectionException) {
+            return@runBlocking
+        }
+        assertTrue(result.output.contains("async_daemon_val"))
+        assertTrue(result.output.contains("/data/local/tmp"))
+    }
+
+    @Test
+    fun testExecDaemonWithMultipleEnvVars() {
+        val result = try {
+            TerminalSession.exec(
+                "echo \$DAEMON_A \$DAEMON_B \$DAEMON_C",
+                socketPath = "@ftyd",
+                env = mapOf("DAEMON_A" to "alpha", "DAEMON_B" to "beta", "DAEMON_C" to "gamma")
+            )
+        } catch (_: DaemonConnectionException) {
+            return
+        }
+        assertTrue(result.output.contains("alpha"))
+        assertTrue(result.output.contains("beta"))
+        assertTrue(result.output.contains("gamma"))
+    }
+
     // =================== Session State (StateFlow) ===================
 
     @Test

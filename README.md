@@ -20,7 +20,7 @@ A native PTY (pseudo-terminal) library for Android, powered by pure C and the An
 - **Custom shell** — configurable shell binary for all session types
 - **UID authentication** — optional SO_PEERCRED-based allowlist for daemon connections (disabled by default)
 - **Typed exceptions** — sealed `TerminalException` hierarchy (`SessionFullException`, `DaemonConnectionException`, `SessionClosedException`, `NativeException`, `WriteException`)
-- **Environment variables & working directory** — `env` and `cwd` parameters for local sessions
+- **Environment variables & working directory** — `env` and `cwd` parameters for all session types (local and daemon)
 - **Session lifecycle StateFlow** — observable `state: StateFlow<SessionState>` (`Running` → `Exited` → `Closed`)
 - **Suspend helpers** — `execAsync()`, `readText()`, `readAll(timeout: Duration)`
 - Exit code capture for all session types (interactive PTY, exec, daemon)
@@ -167,7 +167,7 @@ session.sendSignal(TerminalSession.SIGKILL)   // force kill
 ### Environment Variables & Working Directory
 
 ```kotlin
-// Set env vars and working directory for local sessions
+// Set env vars and working directory
 val session = TerminalSession.create(
     env = mapOf("MY_VAR" to "hello", "DEBUG" to "1"),
     cwd = "/data/local/tmp"
@@ -179,9 +179,20 @@ val result = TerminalSession.exec(
     env = mapOf("MY_VAR" to "world"),
     cwd = "/tmp"
 )
-```
 
-> **Note:** `env` and `cwd` are supported for local sessions only. Daemon sessions use the daemon's environment.
+// Works with daemon sessions too
+val daemonSession = TerminalSession.createDaemon(
+    socketPath = "@ftyd",
+    env = mapOf("MY_VAR" to "root_hello"),
+    cwd = "/data"
+)
+val daemonResult = TerminalSession.exec(
+    command = "echo \$MY_VAR && pwd",
+    socketPath = "@ftyd",
+    env = mapOf("MY_VAR" to "root_world"),
+    cwd = "/data/local/tmp"
+)
+```
 
 ### Session Lifecycle (StateFlow)
 
@@ -433,7 +444,6 @@ fury_terminal/
 ## Known Limitations
 
 - **`su` + signals:** When using `shell = "su"`, signal delivery via `sendSignal()` does not reach the actual command. Magisk's `su` delegates to `magiskd`, which spawns processes in a separate process tree. The library's stored PID is the `su` client (which exits immediately), so `kill(-pid)` cannot reach the real command. **Use the daemon path** (`createDaemon()` or `socketPath = "@ftyd"`) for root sessions that need signal support.
-- **Env vars / cwd + daemon:** The `env` and `cwd` parameters are only supported for local sessions. Daemon exec sessions use the daemon's own environment.
 
 ## Security Notes
 
