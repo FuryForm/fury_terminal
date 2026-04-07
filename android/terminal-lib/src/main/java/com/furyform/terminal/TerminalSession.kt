@@ -228,8 +228,10 @@ class TerminalSession private constructor(
         if (closed) return
         lock.write {
             if (closed) return
-            // Cache exit code before native close wipes the session slot
-            if (cachedExitCode == null) {
+            // Cache exit code before native close wipes the session slot.
+            // Only attempt if the process already exited — nativeGetExitCode
+            // uses blocking waitpid for local exec and would hang otherwise.
+            if (cachedExitCode == null && !NativePTY.nativeIsAlive(id)) {
                 val code = NativePTY.nativeGetExitCode(id)
                 if (code >= 0) cachedExitCode = code
             }

@@ -20,6 +20,7 @@ A native PTY (pseudo-terminal) library for Android, powered by pure C and the An
 - **Custom shell** — configurable shell binary for all session types
 - **UID authentication** — optional SO_PEERCRED-based allowlist for daemon connections (disabled by default)
 - Exit code capture for exec sessions (blocking `waitpid` for local, protocol for daemon)
+- **Process group signals** — `setsid()` + `kill(-pid)` ensures signals reach entire process tree (including grandchildren spawned by `su`)
 - Signal delivery to exec sessions (SIGINT, SIGTERM, SIGKILL, etc.)
 - Live streaming of exec command output via Flow
 
@@ -41,7 +42,7 @@ Add the dependency to your module's `build.gradle.kts`:
 
 ```kotlin
 dependencies {
-    implementation("com.github.FuryForm:fury_terminal:v0.5.0")
+    implementation("com.github.FuryForm:fury_terminal:v0.5.1")
 }
 ```
 

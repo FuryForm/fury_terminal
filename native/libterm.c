@@ -234,15 +234,18 @@ static void do_close_pty(int id) {
 
     if (is_local_exec) {
         /* Local exec: close pipe first (causes child to get SIGPIPE/EOF),
-         * then kill and wait. No process group (no setsid in local exec). */
+         * then kill process group and wait. Try -pid first (setsid subtree),
+         * fall back to pid if the process group doesn't exist (ESRCH). */
         if (master >= 0) close(master);
         if (pid > 0) {
             int status;
             if (waitpid(pid, &status, WNOHANG) == 0) {
-                kill(pid, SIGTERM);
+                if (kill(-pid, SIGTERM) != 0 && errno == ESRCH)
+                    kill(pid, SIGTERM);
                 usleep(100000);
                 if (waitpid(pid, &status, WNOHANG) == 0) {
-                    kill(pid, SIGKILL);
+                    if (kill(-pid, SIGKILL) != 0 && errno == ESRCH)
+                        kill(pid, SIGKILL);
                     waitpid(pid, &status, 0);
                 }
             }
@@ -250,16 +253,16 @@ static void do_close_pty(int id) {
         return;
     }
 
-    /* Local PTY: escalating kill (process group) */
+    /* Local PTY: escalating kill (process group, ESRCH fallback) */
     if (pid > 0) {
         int status;
-        kill(-pid, SIGHUP);
+        if (kill(-pid, SIGHUP) != 0 && errno == ESRCH) kill(pid, SIGHUP);
         usleep(100000);
         if (waitpid(pid, &status, WNOHANG) == 0) {
-            kill(-pid, SIGTERM);
+            if (kill(-pid, SIGTERM) != 0 && errno == ESRCH) kill(pid, SIGTERM);
             usleep(100000);
             if (waitpid(pid, &status, WNOHANG) == 0) {
-                kill(-pid, SIGKILL);
+                if (kill(-pid, SIGKILL) != 0 && errno == ESRCH) kill(pid, SIGKILL);
                 waitpid(pid, &status, 0);
             }
         }
@@ -288,7 +291,13 @@ Java_com_furyform_terminal_NativePTY_nativeStartPTY(JNIEnv *env, jobject thiz,
     if (pid < 0) { close(master); close(slave); return -1; }
     close(slave);
     int id = store_pty(master, pid);
-    if (id < 0) { kill(pid, SIGKILL); waitpid(pid, NULL, 0); close(master); return -1; }
+    if (id < 0) {
+        if (kill(-pid, SIGKILL) != 0 && errno == ESRCH)
+            kill(pid, SIGKILL);
+        waitpid(pid, NULL, 0);
+        close(master);
+        return -1;
+    }
     return (jint)id;
 }
 
@@ -384,6 +393,7 @@ Java_com_furyform_terminal_NativePTY_nativeStartLocalExecSession(
 
     if (pid == 0) {
         /* Child: wire up pipes and exec */
+        setsid(); /* New session so kill(-pid) reaches all descendants (e.g. su → sh → ping) */
         close(stdout_pipe[0]); /* parent reads this end */
         dup2(stdout_pipe[1], 1);  /* stdout to pipe */
         dup2(stdout_pipe[1], 2);  /* stderr to same pipe */
@@ -410,7 +420,8 @@ Java_com_furyform_terminal_NativePTY_nativeStartLocalExecSession(
 
     int id = store_local_exec(stdout_pipe[0], pid);
     if (id < 0) {
-        kill(pid, SIGKILL);
+        if (kill(-pid, SIGKILL) != 0 && errno == ESRCH)
+            kill(pid, SIGKILL);
         waitpid(pid, NULL, 0);
         close(stdout_pipe[0]);
         return -1;
@@ -491,20 +502,11 @@ Java_com_furyform_terminal_NativePTY_nativeSendSignal(JNIEnv *env, jobject thiz,
     int pid = get_pid((int)id);
     if (pid <= 0) return;
 
-    /* Local exec children don't call setsid(), so they have no process group
-     * of their own.  Use kill(pid) instead of kill(-pid) for them. */
-    int is_exec = 0;
-    pthread_mutex_lock(&ptys_mutex);
-    if ((int)id >= 0 && (int)id < MAX_PTYS && ptys[(int)id].in_use)
-        is_exec = ptys[(int)id].is_local_exec;
-    pthread_mutex_unlock(&ptys_mutex);
-
-    if (is_exec) {
+    /* Try process-group kill first: setsid() in child makes -pid target the
+     * entire subtree (e.g. su → sh → ping).  Some shells (mksh) may reset
+     * the process group, causing ESRCH; fall back to direct pid kill. */
+    if (kill(-pid, (int)signum) != 0 && errno == ESRCH) {
         kill(pid, (int)signum);
-    } else {
-        /* PTY session: send to the entire process group (negative pid) so children
-         * (e.g. ping, top) also receive the signal, not just the shell. */
-        kill(-pid, (int)signum);
     }
 }
 

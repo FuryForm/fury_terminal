@@ -3,7 +3,9 @@ package com.furyform.terminal
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import org.junit.Assert.*
 import org.junit.Before
+import org.junit.Rule
 import org.junit.Test
+import org.junit.rules.Timeout
 import org.junit.runner.RunWith
 import java.util.concurrent.Callable
 import java.util.concurrent.Executors
@@ -11,6 +13,9 @@ import java.util.concurrent.TimeUnit
 
 @RunWith(AndroidJUnit4::class)
 class NativePTYTest {
+
+    @get:Rule
+    val globalTimeout: Timeout = Timeout(30, TimeUnit.SECONDS)
 
     private val executor = Executors.newSingleThreadExecutor()
 
@@ -456,6 +461,20 @@ class NativePTYTest {
         NativePTY.nativeSendSignal(id, 9) // SIGKILL
         Thread.sleep(500)
         assertFalse("Process should not be alive after SIGKILL", NativePTY.nativeIsAlive(id))
+        NativePTY.nativeClose(id)
+    }
+
+    @Test
+    fun sendSignal_localExec_reachesChildProcess() {
+        // Verify process group kill reaches grandchild: sh -c 'sleep 60' spawns
+        // sleep as a child of sh; SIGTERM via kill(-pid) should reach both.
+        val id = NativePTY.nativeStartLocalExecSession("/system/bin/sh", "sh -c 'sleep 60'")
+        assertTrue(id >= 0)
+        Thread.sleep(300) // let child tree start
+        assertTrue("Process tree should be alive", NativePTY.nativeIsAlive(id))
+        NativePTY.nativeSendSignal(id, 15) // SIGTERM
+        Thread.sleep(500)
+        assertFalse("Process tree should exit after SIGTERM", NativePTY.nativeIsAlive(id))
         NativePTY.nativeClose(id)
     }
 

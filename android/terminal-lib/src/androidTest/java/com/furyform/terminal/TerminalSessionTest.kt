@@ -8,7 +8,9 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
 import org.junit.Assert.*
+import org.junit.Rule
 import org.junit.Test
+import org.junit.rules.Timeout
 import org.junit.runner.RunWith
 import java.util.concurrent.Callable
 import java.util.concurrent.Executors
@@ -16,6 +18,9 @@ import java.util.concurrent.TimeUnit
 
 @RunWith(AndroidJUnit4::class)
 class TerminalSessionTest {
+
+    @get:Rule
+    val globalTimeout: Timeout = Timeout(30, TimeUnit.SECONDS)
 
     private val executor = Executors.newSingleThreadExecutor()
 
@@ -803,6 +808,20 @@ class TerminalSessionTest {
         session.sendSignal(15) // SIGTERM
         Thread.sleep(500)
         assertFalse("Process should have exited after SIGTERM", session.isAlive)
+        session.close()
+    }
+
+    @Test
+    fun testExecLocalSessionSignalReachesChildProcess() {
+        // Verify that sendSignal reaches grandchild processes via process group kill.
+        // "sh -c 'sleep 60'" forks sleep as a child of sh. SIGTERM via kill(-pid)
+        // should reach the entire process group including the sleep grandchild.
+        val session = TerminalSession.execSession("sh -c 'sleep 60'")
+        Thread.sleep(300) // let child tree start
+        assertTrue("Process tree should be alive", session.isAlive)
+        session.sendSignal(TerminalSession.SIGTERM)
+        Thread.sleep(500)
+        assertFalse("Process tree should have exited after SIGTERM", session.isAlive)
         session.close()
     }
 

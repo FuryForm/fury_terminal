@@ -422,8 +422,9 @@ static void handle_client(int client_fd, const char *shell_path) {
                 int c = ((int)msg_buf[2] << 8) | (int)msg_buf[3];
                 if (r > 0 && c > 0) {
                     set_winsize(master, r, c);
-                    /* Send SIGWINCH to shell's process group */
-                    kill(-shell_pid, SIGWINCH);
+                    /* Send SIGWINCH to shell's process group (ESRCH fallback) */
+                    if (kill(-shell_pid, SIGWINCH) != 0 && errno == ESRCH)
+                        kill(shell_pid, SIGWINCH);
                 }
             }
             break;
@@ -433,7 +434,8 @@ static void handle_client(int client_fd, const char *shell_path) {
                 int sig = (int)msg_buf[0];
                 /* Whitelist signals — reject arbitrary signal injection */
                 if (ftyd_signal_allowed(sig)) {
-                    kill(-shell_pid, sig);
+                    if (kill(-shell_pid, sig) != 0 && errno == ESRCH)
+                        kill(shell_pid, sig);
                 } else {
                     LOGD("Client fd=%d: rejected signal %d\n", client_fd, sig);
                 }
@@ -456,13 +458,13 @@ cleanup:
      * which unblocks the reader thread's read(master_fd). */
     if (shell_pid > 0) {
         int status;
-        kill(-shell_pid, SIGHUP);
+        if (kill(-shell_pid, SIGHUP) != 0 && errno == ESRCH) kill(shell_pid, SIGHUP);
         usleep(100000);
         if (waitpid(shell_pid, &status, WNOHANG) == 0) {
-            kill(-shell_pid, SIGTERM);
+            if (kill(-shell_pid, SIGTERM) != 0 && errno == ESRCH) kill(shell_pid, SIGTERM);
             usleep(100000);
             if (waitpid(shell_pid, &status, WNOHANG) == 0) {
-                kill(-shell_pid, SIGKILL);
+                if (kill(-shell_pid, SIGKILL) != 0 && errno == ESRCH) kill(shell_pid, SIGKILL);
                 waitpid(shell_pid, &status, 0);
             }
         }
@@ -517,7 +519,8 @@ static void *exec_client_reader_thread(void *arg) {
                 if (ftyd_signal_allowed(sig)) {
                     LOGD("EXEC client fd=%d: sending signal %d to pid %d\n",
                          ctx->client_fd, sig, ctx->child_pid);
-                    kill(ctx->child_pid, sig);
+                    if (kill(-ctx->child_pid, sig) != 0 && errno == ESRCH)
+                        kill(ctx->child_pid, sig);
                 } else {
                     LOGD("EXEC client fd=%d: rejected signal %d\n",
                          ctx->client_fd, sig);
@@ -528,9 +531,11 @@ static void *exec_client_reader_thread(void *arg) {
         case FTYD_CLOSE:
             LOGD("EXEC client fd=%d: CLOSE received, killing child %d\n",
                  ctx->client_fd, ctx->child_pid);
-            kill(ctx->child_pid, SIGTERM);
+            if (kill(-ctx->child_pid, SIGTERM) != 0 && errno == ESRCH)
+                kill(ctx->child_pid, SIGTERM);
             usleep(50000);
-            kill(ctx->child_pid, SIGKILL);
+            if (kill(-ctx->child_pid, SIGKILL) != 0 && errno == ESRCH)
+                kill(ctx->child_pid, SIGKILL);
             goto done;
 
         default:
@@ -635,6 +640,8 @@ static void handle_exec(int client_fd, const char *shell_path,
         close(stdout_pipe[0]); /* parent reads this end */
         close(stdin_pipe[1]);  /* parent writes this end */
 
+        setsid(); /* New session so kill(-pid) reaches all descendants */
+
         dup2(stdin_pipe[0], 0);   /* stdin from pipe */
         dup2(stdout_pipe[1], 1);  /* stdout to pipe */
         dup2(stdout_pipe[1], 2);  /* stderr to same pipe */
@@ -685,10 +692,12 @@ static void handle_exec(int client_fd, const char *shell_path,
     ssize_t n;
     while ((n = read(stdout_pipe[0], buf, sizeof(buf))) > 0) {
         if (proto_send(client_fd, FTYD_DATA, buf, (uint32_t)n) < 0) {
-            /* Client disconnected — kill the child to avoid leaking processes */
-            kill(pid, SIGTERM);
+            /* Client disconnected — kill the child process group to avoid leaking processes */
+            if (kill(-pid, SIGTERM) != 0 && errno == ESRCH)
+                kill(pid, SIGTERM);
             usleep(50000);
-            kill(pid, SIGKILL);
+            if (kill(-pid, SIGKILL) != 0 && errno == ESRCH)
+                kill(pid, SIGKILL);
             break;
         }
     }
