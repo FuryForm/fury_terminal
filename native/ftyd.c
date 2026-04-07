@@ -362,7 +362,7 @@ static void handle_client(int client_fd, const char *shell_path) {
 
     set_winsize(master, rows, cols);
 
-    int shell_pid = do_fork_exec(slave, shell_path);
+    int shell_pid = do_fork_exec(slave, shell_path, NULL, NULL);
     close(slave); /* parent doesn't need slave */
 
     if (shell_pid < 0) {

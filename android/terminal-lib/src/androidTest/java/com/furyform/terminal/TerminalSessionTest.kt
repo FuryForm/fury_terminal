@@ -7,6 +7,7 @@ import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlin.time.Duration.Companion.seconds
 import org.junit.Assert.*
 import org.junit.Rule
 import org.junit.Test
@@ -79,7 +80,7 @@ class TerminalSessionTest {
         session.close()
     }
 
-    @Test(expected = IllegalStateException::class)
+    @Test(expected = SessionClosedException::class)
     fun write_afterClose_throws() {
         val session = TerminalSession.create()
         session.close()
@@ -99,7 +100,7 @@ class TerminalSessionTest {
         session.close()
     }
 
-    @Test(expected = IllegalStateException::class)
+    @Test(expected = SessionClosedException::class)
     fun read_afterClose_throws() {
         val session = TerminalSession.create()
         session.close()
@@ -161,7 +162,7 @@ class TerminalSessionTest {
         session.close()
     }
 
-    @Test(expected = IllegalStateException::class)
+    @Test(expected = SessionClosedException::class)
     fun resize_afterClose_throws() {
         val session = TerminalSession.create()
         session.close()
@@ -181,7 +182,7 @@ class TerminalSessionTest {
         session.close()
     }
 
-    @Test(expected = IllegalStateException::class)
+    @Test(expected = SessionClosedException::class)
     fun sendSignal_afterClose_throws() {
         val session = TerminalSession.create()
         session.close()
@@ -242,7 +243,7 @@ class TerminalSessionTest {
 
     @Test
     fun usePattern_closesSessionAutomatically() {
-        var closed = false
+        val closed: Boolean
         TerminalSession.create().use { session ->
             assertFalse(session.isClosed)
             session.write("echo USE_TEST\n")
@@ -296,11 +297,8 @@ class TerminalSessionTest {
             val session = TerminalSession.createDaemon(socketPath = "@ftyd")
             assertFalse(session.isClosed)
             session.close()
-        } catch (e: IllegalStateException) {
-            assertTrue(
-                "Expected daemon connection error",
-                e.message?.contains("Failed to connect") == true
-            )
+        } catch (e: DaemonConnectionException) {
+            assertEquals("@ftyd", e.socketPath)
         }
     }
 
@@ -308,7 +306,7 @@ class TerminalSessionTest {
     fun createDaemon_writeAndRead() {
         val session = try {
             TerminalSession.createDaemon(socketPath = "@ftyd")
-        } catch (_: IllegalStateException) {
+        } catch (_: DaemonConnectionException) {
             return // Daemon not running
         }
 
@@ -329,7 +327,7 @@ class TerminalSessionTest {
     fun createDaemon_resize() {
         val session = try {
             TerminalSession.createDaemon(socketPath = "@ftyd")
-        } catch (_: IllegalStateException) {
+        } catch (_: DaemonConnectionException) {
             return
         }
 
@@ -342,7 +340,7 @@ class TerminalSessionTest {
     fun createDaemon_sendSignal() {
         val session = try {
             TerminalSession.createDaemon(socketPath = "@ftyd")
-        } catch (_: IllegalStateException) {
+        } catch (_: DaemonConnectionException) {
             return
         }
 
@@ -361,7 +359,7 @@ class TerminalSessionTest {
     fun createDaemon_runAsRoot() {
         val session = try {
             TerminalSession.createDaemon(socketPath = "@ftyd")
-        } catch (_: IllegalStateException) {
+        } catch (_: DaemonConnectionException) {
             return
         }
 
@@ -386,7 +384,7 @@ class TerminalSessionTest {
     fun createDaemon_outputFlow() = runBlocking {
         val session = try {
             TerminalSession.createDaemon(socketPath = "@ftyd")
-        } catch (_: IllegalStateException) {
+        } catch (_: DaemonConnectionException) {
             return@runBlocking
         }
 
@@ -405,8 +403,8 @@ class TerminalSessionTest {
         try {
             TerminalSession.createDaemon(socketPath = "@nonexistent_ftyd_test")
             fail("Should throw for invalid socket path")
-        } catch (e: IllegalStateException) {
-            assertTrue(e.message?.contains("Failed to connect") == true)
+        } catch (e: DaemonConnectionException) {
+            assertEquals("@nonexistent_ftyd_test", e.socketPath)
         }
     }
 
@@ -414,7 +412,7 @@ class TerminalSessionTest {
     fun createDaemon_close_idempotent() {
         val session = try {
             TerminalSession.createDaemon(socketPath = "@ftyd")
-        } catch (_: IllegalStateException) {
+        } catch (_: DaemonConnectionException) {
             return
         }
 
@@ -430,7 +428,7 @@ class TerminalSessionTest {
     fun testExecSimpleCommand() {
         val result = try {
             TerminalSession.exec("echo hello", "@ftyd")
-        } catch (_: IllegalStateException) {
+        } catch (_: DaemonConnectionException) {
             return // Daemon not running
         }
 
@@ -446,7 +444,7 @@ class TerminalSessionTest {
     fun testExecExitCode() {
         val result = try {
             TerminalSession.exec("exit 42", "@ftyd")
-        } catch (_: IllegalStateException) {
+        } catch (_: DaemonConnectionException) {
             return // Daemon not running
         }
 
@@ -458,7 +456,7 @@ class TerminalSessionTest {
     fun testExecCommandNotFound() {
         val result = try {
             TerminalSession.exec("nonexistent_command_xyz", "@ftyd")
-        } catch (_: IllegalStateException) {
+        } catch (_: DaemonConnectionException) {
             return // Daemon not running
         }
 
@@ -469,7 +467,7 @@ class TerminalSessionTest {
     fun testExecMultilineOutput() {
         val result = try {
             TerminalSession.exec("echo line1; echo line2; echo line3", "@ftyd")
-        } catch (_: IllegalStateException) {
+        } catch (_: DaemonConnectionException) {
             return // Daemon not running
         }
 
@@ -491,7 +489,7 @@ class TerminalSessionTest {
     fun testExecNoEcho() {
         val result = try {
             TerminalSession.exec("echo test123", "@ftyd")
-        } catch (_: IllegalStateException) {
+        } catch (_: DaemonConnectionException) {
             return // Daemon not running
         }
 
@@ -509,7 +507,7 @@ class TerminalSessionTest {
     fun testExecSessionStreaming() {
         val session = try {
             TerminalSession.execSession("echo a; echo b; echo c", "@ftyd")
-        } catch (_: IllegalStateException) {
+        } catch (_: DaemonConnectionException) {
             return // Daemon not running
         }
 
@@ -541,7 +539,7 @@ class TerminalSessionTest {
     fun testExecLargeOutput() {
         val result = try {
             TerminalSession.exec("seq 1 1000", "@ftyd")
-        } catch (_: IllegalStateException) {
+        } catch (_: DaemonConnectionException) {
             return // Daemon not running
         }
 
@@ -560,7 +558,7 @@ class TerminalSessionTest {
     fun testExecStderrCaptured() {
         val result = try {
             TerminalSession.exec("echo err >&2", "@ftyd")
-        } catch (_: IllegalStateException) {
+        } catch (_: DaemonConnectionException) {
             return // Daemon not running
         }
 
@@ -574,7 +572,7 @@ class TerminalSessionTest {
     fun testExecPipeSupport() {
         val result = try {
             TerminalSession.exec("echo hello world | tr ' ' '\n'", "@ftyd")
-        } catch (_: IllegalStateException) {
+        } catch (_: DaemonConnectionException) {
             return // Daemon not running
         }
 
@@ -904,7 +902,7 @@ class TerminalSessionTest {
         // socketPath = "@ftyd" routes to daemon exec; skip if daemon not running
         val result = try {
             TerminalSession.exec("id", socketPath = "@ftyd")
-        } catch (_: IllegalStateException) {
+        } catch (_: DaemonConnectionException) {
             return // Daemon not running — skip
         }
         assertTrue(
@@ -961,5 +959,254 @@ class TerminalSessionTest {
             session.close()
             assertTrue("Session $i should be closed", session.isClosed)
         }
+    }
+
+    // =================== Env Vars + Working Directory ===================
+
+    @Test
+    fun testExecLocalWithEnvVars() {
+        val result = TerminalSession.exec(
+            "echo \$MY_TEST_VAR",
+            env = mapOf("MY_TEST_VAR" to "fury_env_test_123")
+        )
+        assertTrue(
+            "Output should contain env var value 'fury_env_test_123', got: ${result.output.take(200)}",
+            result.output.contains("fury_env_test_123")
+        )
+        assertEquals(0, result.exitCode)
+    }
+
+    @Test
+    fun testExecLocalWithMultipleEnvVars() {
+        val result = TerminalSession.exec(
+            "echo \$VAR_A \$VAR_B",
+            env = mapOf("VAR_A" to "alpha", "VAR_B" to "beta")
+        )
+        assertTrue(result.output.contains("alpha"))
+        assertTrue(result.output.contains("beta"))
+    }
+
+    @Test
+    fun testExecLocalWithCwd() {
+        val result = TerminalSession.exec("pwd", cwd = "/data/local/tmp")
+        assertTrue(
+            "Output should contain '/data/local/tmp', got: ${result.output.take(200)}",
+            result.output.trim().contains("/data/local/tmp")
+        )
+        assertEquals(0, result.exitCode)
+    }
+
+    @Test
+    fun testExecLocalWithEnvAndCwd() {
+        val result = TerminalSession.exec(
+            "echo \$FURY_CWD_TEST && pwd",
+            env = mapOf("FURY_CWD_TEST" to "combined"),
+            cwd = "/data/local/tmp"
+        )
+        assertTrue(result.output.contains("combined"))
+        assertTrue(result.output.contains("/data/local/tmp"))
+    }
+
+    @Test
+    fun testExecLocalEnvOverridesDefaults() {
+        // Custom PATH should override the default
+        val result = TerminalSession.exec(
+            "echo \$PATH",
+            env = mapOf("PATH" to "/custom/path:/system/bin")
+        )
+        assertTrue(
+            "Custom PATH should appear, got: ${result.output.take(200)}",
+            result.output.contains("/custom/path")
+        )
+    }
+
+    @Test
+    fun testExecLocalWithInvalidCwd() {
+        // Invalid cwd is best-effort — chdir fails silently, command still runs
+        val result = TerminalSession.exec("echo still_works", cwd = "/nonexistent/path")
+        assertTrue(result.output.contains("still_works"))
+        assertEquals(0, result.exitCode)
+    }
+
+    @Test
+    fun testCreateWithCwd() {
+        val session = TerminalSession.create(cwd = "/data/local/tmp")
+        session.use {
+            it.write("pwd\n")
+            Thread.sleep(500)
+            val data = readWithTimeout(it)
+            assertNotNull(data)
+            val output = String(data!!)
+            assertTrue(
+                "PTY session should start in /data/local/tmp, got: ${output.take(200)}",
+                output.contains("/data/local/tmp")
+            )
+        }
+    }
+
+    @Test
+    fun testCreateWithEnvVars() {
+        val session = TerminalSession.create(env = mapOf("FURY_TEST_ENV" to "pty_env_val"))
+        session.use {
+            it.write("echo \$FURY_TEST_ENV\n")
+            Thread.sleep(500)
+            val data = readWithTimeout(it)
+            assertNotNull(data)
+            val output = String(data!!)
+            assertTrue(
+                "PTY session should have custom env, got: ${output.take(200)}",
+                output.contains("pty_env_val")
+            )
+        }
+    }
+
+    // =================== Session State (StateFlow) ===================
+
+    @Test
+    fun testStateInitiallyRunning() {
+        val session = TerminalSession.create()
+        assertEquals(SessionState.Running, session.state.value)
+        session.close()
+    }
+
+    @Test
+    fun testStateClosedAfterClose() {
+        val session = TerminalSession.create()
+        session.close()
+        assertEquals(SessionState.Closed, session.state.value)
+    }
+
+    @Test
+    fun testStateExitedAfterReadAll() {
+        val session = TerminalSession.execSession("echo state_test")
+        session.readAll()
+        val state = session.state.value
+        assertTrue(
+            "State should be Exited after readAll(), got: $state",
+            state is SessionState.Exited
+        )
+        assertEquals(0, (state as SessionState.Exited).exitCode)
+        session.close()
+    }
+
+    @Test
+    fun testStateExitedThenClosed() {
+        val session = TerminalSession.execSession("echo state_lifecycle")
+        session.readAll()
+        assertTrue(session.state.value is SessionState.Exited)
+        session.close()
+        assertEquals(SessionState.Closed, session.state.value)
+    }
+
+    @Test
+    fun testStateExitedViaOutputFlow() = runBlocking {
+        val session = TerminalSession.execSession("echo flow_state")
+        withTimeoutOrNull(5000L) {
+            session.output().toList()
+        }
+        val state = session.state.value
+        assertTrue(
+            "State should be Exited after output flow completes, got: $state",
+            state is SessionState.Exited
+        )
+        session.close()
+    }
+
+    // =================== readText() ===================
+
+    @Test
+    fun testReadText() {
+        val session = TerminalSession.create()
+        session.write("echo READTEXT_TEST\n")
+        Thread.sleep(500)
+        val text = session.readText()
+        assertNotNull("readText() should return non-null", text)
+        assertTrue(text!!.contains("READTEXT_TEST"))
+        session.close()
+    }
+
+    // =================== readAll(timeout) ===================
+
+    @Test
+    fun testReadAllWithTimeout() = runBlocking {
+        val session = TerminalSession.execSession("echo timeout_test")
+        val output = session.readAll(5.seconds)
+        assertTrue(output.contains("timeout_test"))
+        session.close()
+    }
+
+    // =================== execAsync ===================
+
+    @Test
+    fun testExecAsync() = runBlocking {
+        val result = TerminalSession.execAsync("echo async_test")
+        assertTrue(result.output.contains("async_test"))
+        assertEquals(0, result.exitCode)
+    }
+
+    @Test
+    fun testExecAsyncWithEnvAndCwd() = runBlocking {
+        val result = TerminalSession.execAsync(
+            "echo \$ASYNC_VAR && pwd",
+            env = mapOf("ASYNC_VAR" to "async_env"),
+            cwd = "/data/local/tmp"
+        )
+        assertTrue(result.output.contains("async_env"))
+        assertTrue(result.output.contains("/data/local/tmp"))
+    }
+
+    // =================== Exit Code for PTY Sessions (#5) ===================
+
+    @Test
+    fun testPtySessionExitCode() {
+        val session = TerminalSession.create()
+        session.write("exit 42\n")
+        // Drain output until EOF
+        while (readWithTimeout(session, 2000) != null) { /* drain */ }
+        Thread.sleep(500)
+        val exitCode = session.exitCode
+        assertEquals("PTY session exit code should be 42", 42, exitCode)
+        session.close()
+    }
+
+    @Test
+    fun testPtySessionExitCodeZero() {
+        val session = TerminalSession.create()
+        session.write("exit 0\n")
+        while (readWithTimeout(session, 2000) != null) { /* drain */ }
+        Thread.sleep(500)
+        val exitCode = session.exitCode
+        assertEquals("PTY session exit code should be 0", 0, exitCode)
+        session.close()
+    }
+
+    @Test
+    fun testPtySessionExitCodeCachedAfterClose() {
+        val session = TerminalSession.create()
+        session.write("exit 7\n")
+        while (readWithTimeout(session, 2000) != null) { /* drain */ }
+        Thread.sleep(500)
+        session.close()
+        assertEquals("Exit code should be cached after close", 7, session.exitCode)
+    }
+
+    // =================== write() Throws on Error (#6) ===================
+
+    @Test
+    fun testWriteAfterProcessExitThrowsOrSucceeds() {
+        // After the shell exits, write may succeed (kernel buffers) or fail.
+        // If it fails, it should throw WriteException, not return -1.
+        val session = TerminalSession.execSession("exit 0")
+        session.readAll() // wait for exit
+        Thread.sleep(200)
+        try {
+            session.write("should fail or succeed")
+            // If no exception, that's ok — kernel may buffer
+        } catch (e: WriteException) {
+            assertTrue("WriteException bytesOrCode should be negative", e.bytesOrCode < 0)
+        } catch (e: SessionClosedException) {
+            // Also acceptable if session auto-closed
+        }
+        session.close()
     }
 }

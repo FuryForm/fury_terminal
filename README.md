@@ -19,8 +19,12 @@ A native PTY (pseudo-terminal) library for Android, powered by pure C and the An
 - **Local exec** — fork+pipe exec without root or daemon (runs as app UID)
 - **Custom shell** — configurable shell binary for all session types
 - **UID authentication** — optional SO_PEERCRED-based allowlist for daemon connections (disabled by default)
-- Exit code capture for exec sessions (blocking `waitpid` for local, protocol for daemon)
-- **Process group signals** — `setsid()` + `kill(-pid)` ensures signals reach entire process tree (including grandchildren spawned by `su`)
+- **Typed exceptions** — sealed `TerminalException` hierarchy (`SessionFullException`, `DaemonConnectionException`, `SessionClosedException`, `NativeException`, `WriteException`)
+- **Environment variables & working directory** — `env` and `cwd` parameters for local sessions
+- **Session lifecycle StateFlow** — observable `state: StateFlow<SessionState>` (`Running` → `Exited` → `Closed`)
+- **Suspend helpers** — `execAsync()`, `readText()`, `readAll(timeout: Duration)`
+- Exit code capture for all session types (interactive PTY, exec, daemon)
+- **Process group signals** — `setsid()` + `kill(-pid)` ensures signals reach entire process tree
 - Signal delivery to exec sessions (SIGINT, SIGTERM, SIGKILL, etc.)
 - Live streaming of exec command output via Flow
 
@@ -42,7 +46,7 @@ Add the dependency to your module's `build.gradle.kts`:
 
 ```kotlin
 dependencies {
-    implementation("com.github.FuryForm:fury_terminal:v0.5.1")
+    implementation("com.github.FuryForm:fury_terminal:v0.6.0")
 }
 ```
 
@@ -158,6 +162,72 @@ val session = TerminalSession.execSession("sleep 60")
 session.sendSignal(TerminalSession.SIGINT)    // interrupt
 session.sendSignal(TerminalSession.SIGTERM)   // graceful terminate
 session.sendSignal(TerminalSession.SIGKILL)   // force kill
+```
+
+### Environment Variables & Working Directory
+
+```kotlin
+// Set env vars and working directory for local sessions
+val session = TerminalSession.create(
+    env = mapOf("MY_VAR" to "hello", "DEBUG" to "1"),
+    cwd = "/data/local/tmp"
+)
+
+// Also works with exec
+val result = TerminalSession.exec(
+    command = "echo \$MY_VAR",
+    env = mapOf("MY_VAR" to "world"),
+    cwd = "/tmp"
+)
+```
+
+> **Note:** `env` and `cwd` are supported for local sessions only. Daemon sessions use the daemon's environment.
+
+### Session Lifecycle (StateFlow)
+
+```kotlin
+val session = TerminalSession.create()
+
+// Observe state transitions: Running → Exited(exitCode) → Closed
+launch {
+    session.state.collect { state ->
+        when (state) {
+            is SessionState.Running -> println("Session active")
+            is SessionState.Exited -> println("Process exited: ${state.exitCode}")
+            is SessionState.Closed -> println("Session closed")
+        }
+    }
+}
+```
+
+### Suspend Helpers
+
+```kotlin
+// Async exec (suspend function)
+val result = TerminalSession.execAsync("ls -la /", socketPath = "@ftyd")
+
+// Read as text
+val text = session.readText()  // returns String? instead of ByteArray?
+
+// Read all output with timeout
+val output = session.readAll(timeout = 5.seconds)
+```
+
+### Typed Exceptions
+
+```kotlin
+try {
+    val session = TerminalSession.create()
+    session.write("hello\n")
+} catch (e: SessionFullException) {
+    // All 16 session slots are in use
+} catch (e: SessionClosedException) {
+    // Session was already closed
+} catch (e: WriteException) {
+    // Write to terminal failed
+} catch (e: NativeException) {
+    // Other native error
+}
 ```
 
 ### Custom Shell
@@ -359,6 +429,11 @@ fury_terminal/
 ├── build.sh / build.ps1            # Native build scripts (daemon + .so)
 └── jitpack.yml                     # JitPack build configuration
 ```
+
+## Known Limitations
+
+- **`su` + signals:** When using `shell = "su"`, signal delivery via `sendSignal()` does not reach the actual command. Magisk's `su` delegates to `magiskd`, which spawns processes in a separate process tree. The library's stored PID is the `su` client (which exits immediately), so `kill(-pid)` cannot reach the real command. **Use the daemon path** (`createDaemon()` or `socketPath = "@ftyd"`) for root sessions that need signal support.
+- **Env vars / cwd + daemon:** The `env` and `cwd` parameters are only supported for local sessions. Daemon exec sessions use the daemon's own environment.
 
 ## Security Notes
 

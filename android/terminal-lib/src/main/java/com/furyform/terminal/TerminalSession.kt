@@ -2,15 +2,21 @@ package com.furyform.terminal
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import java.io.Closeable
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.locks.ReentrantReadWriteLock
 import kotlin.concurrent.read
 import kotlin.concurrent.write
 import kotlin.coroutines.coroutineContext
+import kotlin.time.Duration
 
 /**
  * Result of executing a command via [TerminalSession.exec].
@@ -25,6 +31,20 @@ data class ExecResult(
 ) {
     /** Whether the command succeeded (exit code 0). */
     val isSuccess: Boolean get() = exitCode == 0
+}
+
+/**
+ * Lifecycle state of a [TerminalSession].
+ *
+ * Observable via [TerminalSession.state] as a [StateFlow].
+ */
+sealed interface SessionState {
+    /** The session is active and the shell process is running. */
+    data object Running : SessionState
+    /** The shell process has exited with the given [exitCode]. The session can still be read until EOF. */
+    data class Exited(val exitCode: Int) : SessionState
+    /** The session has been closed. No further operations are possible. */
+    data object Closed : SessionState
 }
 
 /**
@@ -60,6 +80,14 @@ data class ExecResult(
  * val result = TerminalSession.exec("ls -la /data", socketPath = "@ftyd")
  * ```
  *
+ * ## Known limitations
+ * - **`su` + signals:** When using `shell = "su"`, signal delivery via [sendSignal] does
+ *   not reach the actual command. Magisk's `su` delegates to `magiskd`, which spawns
+ *   processes in a separate process tree. Use the daemon path ([createDaemon], or
+ *   `socketPath = "@ftyd"`) for root sessions that need signal support.
+ * - **Env vars / cwd + daemon exec:** The [env] and [cwd] parameters are only supported
+ *   for local sessions. Daemon exec sessions ignore them (the daemon's environment applies).
+ *
  * This class is thread-safe. The native layer uses mutex-protected session management.
  */
 class TerminalSession private constructor(
@@ -76,6 +104,18 @@ class TerminalSession private constructor(
     /** Cached exit code — set before native close wipes the slot. */
     @Volatile
     private var cachedExitCode: Int? = null
+
+    private val _state = MutableStateFlow<SessionState>(SessionState.Running)
+
+    /**
+     * Observable lifecycle state of this session.
+     *
+     * Transitions: [SessionState.Running] → [SessionState.Exited] → [SessionState.Closed].
+     * The [Exited][SessionState.Exited] state is emitted when the process exits (detected
+     * via [isAlive] returning false after output EOF). [Closed][SessionState.Closed] is
+     * emitted when [close] is called.
+     */
+    val state: StateFlow<SessionState> = _state.asStateFlow()
 
     /**
      * Whether the shell process is still running.
@@ -96,10 +136,11 @@ class TerminalSession private constructor(
         get() = closed
 
     /**
-     * The exit code of the remote process (exec sessions only).
+     * The exit code of the shell process.
      *
-     * Returns -1 if the session is still running, not an exec session,
-     * or the exit code hasn't been received yet.
+     * Works for all session types: interactive PTY, daemon, and exec sessions.
+     * Returns -1 if the session is still running or the exit code hasn't been
+     * received yet.
      * Read all output first (until [read] returns null) before checking this.
      *
      * Safe to call after [close] — the exit code is cached before the native
@@ -124,7 +165,7 @@ class TerminalSession private constructor(
      */
     fun read(): ByteArray? {
         lock.read {
-            check(!closed) { "Session is closed" }
+            if (closed) throw SessionClosedException()
             activeReaders.incrementAndGet()
         }
         try {
@@ -137,19 +178,23 @@ class TerminalSession private constructor(
     /**
      * Write raw bytes to the terminal input.
      *
-     * @return number of bytes written, or -1 on error
+     * @return number of bytes written
+     * @throws WriteException if the write fails
      */
     fun write(data: ByteArray): Int {
         lock.read {
-            check(!closed) { "Session is closed" }
-            return NativePTY.nativeWrite(id, data)
+            if (closed) throw SessionClosedException()
+            val n = NativePTY.nativeWrite(id, data)
+            if (n < 0) throw WriteException(n, "Write failed (returned $n)")
+            return n
         }
     }
 
     /**
      * Write a string to the terminal input (UTF-8 encoded).
      *
-     * @return number of bytes written, or -1 on error
+     * @return number of bytes written
+     * @throws WriteException if the write fails
      */
     fun write(text: String): Int {
         return write(text.toByteArray(Charsets.UTF_8))
@@ -158,12 +203,15 @@ class TerminalSession private constructor(
     /**
      * Resize the terminal window.
      *
-     * @return 0 on success, -1 on error
+     * @return 0 on success
+     * @throws WriteException if the resize fails
      */
     fun resize(rows: Int, cols: Int): Int {
         lock.read {
-            check(!closed) { "Session is closed" }
-            return NativePTY.nativeResize(id, rows, cols)
+            if (closed) throw SessionClosedException()
+            val rc = NativePTY.nativeResize(id, rows, cols)
+            if (rc < 0) throw WriteException(rc, "Resize failed (returned $rc)")
+            return rc
         }
     }
 
@@ -194,7 +242,15 @@ class TerminalSession private constructor(
             if (data != null && data.isNotEmpty()) {
                 emit(data)
             } else {
-                // EOF or error — process likely exited
+                // EOF or error — process likely exited.
+                // Use lock to prevent race with close() overwriting Closed state.
+                lock.read {
+                    if (!closed && _state.value is SessionState.Running) {
+                        val code = NativePTY.nativeGetExitCode(id)
+                        if (code >= 0) cachedExitCode = code
+                        _state.value = SessionState.Exited(code)
+                    }
+                }
                 break
             }
         }
@@ -209,11 +265,19 @@ class TerminalSession private constructor(
      * - [SIGTERM] — graceful terminate
      * - [SIGKILL] — force kill (cannot be caught)
      *
+     * **Known limitation:** Signal delivery does not work when `shell = "su"` is
+     * used with [create], [exec], or [execSession]. Magisk's `su` is a thin client
+     * that delegates to `magiskd`, which forks the actual command in a separate
+     * process tree. The library's stored PID is the `su` client (which exits
+     * immediately), so `kill(-pid)` cannot reach the real command process.
+     * For root sessions that require signal support, use the daemon path instead:
+     * [createDaemon] or pass `socketPath = "@ftyd"` to [exec] / [execSession].
+     *
      * Example: `session.sendSignal(TerminalSession.SIGINT)`
      */
     fun sendSignal(signum: Int) {
         lock.read {
-            check(!closed) { "Session is closed" }
+            if (closed) throw SessionClosedException()
             NativePTY.nativeSendSignal(id, signum)
         }
     }
@@ -238,6 +302,7 @@ class TerminalSession private constructor(
             closed = true
             // Kills child + closes fd, which unblocks any in-flight nativeRead()
             NativePTY.nativeClose(id)
+            _state.value = SessionState.Closed
         }
         // Wait for in-flight readers to see the EOF and exit.
         // nativeClose already made nativeRead return, so this should be near-instant.
@@ -261,7 +326,40 @@ class TerminalSession private constructor(
             val chunk = read() ?: break
             sb.append(String(chunk, Charsets.UTF_8))
         }
+        // Transition to Exited if process has finished.
+        // Use lock to prevent race with close() overwriting Closed state.
+        lock.read {
+            if (!closed && _state.value is SessionState.Running) {
+                val code = NativePTY.nativeGetExitCode(id)
+                if (code >= 0) cachedExitCode = code
+                _state.value = SessionState.Exited(code)
+            }
+        }
         return sb.toString()
+    }
+
+    /**
+     * Read bytes from the terminal output and decode as a UTF-8 string.
+     *
+     * This call **blocks** until data is available.
+     * Returns null on EOF (process exited) or error.
+     */
+    fun readText(): String? = read()?.let { String(it, Charsets.UTF_8) }
+
+    /**
+     * Read all remaining output with a timeout.
+     *
+     * Like [readAll], blocks until the process exits (EOF), but gives up after
+     * [timeout] elapses. Useful for exec sessions where the process may hang.
+     *
+     * @param timeout maximum time to wait for all output
+     * @return all output concatenated as a UTF-8 string
+     * @throws kotlinx.coroutines.TimeoutCancellationException if the timeout expires
+     */
+    suspend fun readAll(timeout: Duration): String = withTimeout(timeout) {
+        withContext(Dispatchers.IO) {
+            readAll()
+        }
     }
 
     companion object {
@@ -283,19 +381,36 @@ class TerminalSession private constructor(
         const val SIGTSTP = 20
         /** Window change — notify process of terminal resize. */
         const val SIGWINCH = 28
+
+        // =================== Internal Helpers ===================
+
+        /** Convert a Map of env vars to the "KEY=VALUE" array format expected by JNI. */
+        private fun envToArray(env: Map<String, String>?): Array<String>? {
+            if (env.isNullOrEmpty()) return null
+            return env.map { (k, v) -> "$k=$v" }.toTypedArray()
+        }
+
         /**
          * Create a local PTY session. The shell runs as the app's own UID.
          *
          * @param rows terminal height in rows (default 24)
          * @param cols terminal width in cols (default 80)
          * @param shell the shell binary to launch (default: "/system/bin/sh")
+         * @param env custom environment variables for the shell process (default: null, uses system defaults)
+         * @param cwd working directory for the shell process (default: null, uses system default)
          */
         @JvmStatic
         @JvmOverloads
-        fun create(rows: Int = 24, cols: Int = 80, shell: String = "/system/bin/sh"): TerminalSession {
+        fun create(
+            rows: Int = 24,
+            cols: Int = 80,
+            shell: String = "/system/bin/sh",
+            env: Map<String, String>? = null,
+            cwd: String? = null
+        ): TerminalSession {
             NativePTY.ensureLoaded()
-            val id = NativePTY.nativeStartPTY(rows, cols, shell)
-            check(id >= 0) { "Failed to start PTY session (native returned $id)" }
+            val id = NativePTY.nativeStartPTY(rows, cols, shell, envToArray(env), cwd)
+            if (id < 0) throw NativeException(id, "Failed to start PTY session (native returned $id)")
             return TerminalSession(id)
         }
 
@@ -314,7 +429,7 @@ class TerminalSession private constructor(
          * @param rows terminal height in rows (default 24)
          * @param cols terminal width in cols (default 80)
          * @param shell the shell binary the daemon should launch (default: "/system/bin/sh")
-         * @throws IllegalStateException if the daemon is not running or refused the connection
+         * @throws DaemonConnectionException if the daemon is not running or refused the connection
          */
         @JvmStatic
         @JvmOverloads
@@ -326,7 +441,7 @@ class TerminalSession private constructor(
         ): TerminalSession {
             NativePTY.ensureLoaded()
             val id = NativePTY.nativeStartDaemonSession(socketPath, rows, cols, shell)
-            check(id >= 0) { "Failed to connect to ftyd at $socketPath — is the daemon running?" }
+            if (id < 0) throw DaemonConnectionException(socketPath)
             return TerminalSession(id)
         }
 
@@ -352,17 +467,22 @@ class TerminalSession private constructor(
          * @param command the shell command to execute (passed to `shell -c`)
          * @param socketPath daemon socket path, or null for local exec (default: null)
          * @param shell the shell binary to use (default: "/system/bin/sh")
+         * @param env custom environment variables (local exec only; ignored for daemon exec)
+         * @param cwd working directory (local exec only; ignored for daemon exec)
          * @return [ExecResult] with the complete output and exit code
-         * @throws IllegalStateException if local fork fails or daemon is not running
+         * @throws NativeException if local fork fails
+         * @throws DaemonConnectionException if the daemon is not running
          */
         @JvmStatic
         @JvmOverloads
         fun exec(
             command: String,
             socketPath: String? = null,
-            shell: String = "/system/bin/sh"
+            shell: String = "/system/bin/sh",
+            env: Map<String, String>? = null,
+            cwd: String? = null
         ): ExecResult {
-            val session = execSession(command, socketPath, shell)
+            val session = execSession(command, socketPath, shell, env, cwd)
             session.use {
                 val output = it.readAll()
                 val exitCode = it.exitCode
@@ -400,25 +520,47 @@ class TerminalSession private constructor(
          * @param command the shell command to execute (passed to `shell -c`)
          * @param socketPath daemon socket path, or null for local exec (default: null)
          * @param shell the shell binary to use (default: "/system/bin/sh")
-         * @throws IllegalStateException if local fork fails or daemon is not running
+         * @param env custom environment variables (local exec only; ignored for daemon exec)
+         * @param cwd working directory (local exec only; ignored for daemon exec)
+         * @throws NativeException if local fork fails
+         * @throws DaemonConnectionException if the daemon is not running
          */
         @JvmStatic
         @JvmOverloads
         fun execSession(
             command: String,
             socketPath: String? = null,
-            shell: String = "/system/bin/sh"
+            shell: String = "/system/bin/sh",
+            env: Map<String, String>? = null,
+            cwd: String? = null
         ): TerminalSession {
             NativePTY.ensureLoaded()
             if (socketPath != null) {
                 val id = NativePTY.nativeStartExecSession(socketPath, command, shell)
-                check(id >= 0) { "Failed to connect to ftyd at $socketPath for exec — is the daemon running?" }
+                if (id < 0) throw DaemonConnectionException(socketPath, "Failed to connect to ftyd at $socketPath for exec — is the daemon running?")
                 return TerminalSession(id)
             } else {
-                val id = NativePTY.nativeStartLocalExecSession(shell, command)
-                check(id >= 0) { "Failed to start local exec session (native returned $id)" }
+                val id = NativePTY.nativeStartLocalExecSession(shell, command, envToArray(env), cwd)
+                if (id < 0) throw NativeException(id, "Failed to start local exec session (native returned $id)")
                 return TerminalSession(id)
             }
+        }
+
+        /**
+         * Suspend version of [exec]. Runs the blocking exec on [Dispatchers.IO].
+         *
+         * @see exec for parameter documentation
+         */
+        @JvmStatic
+        @JvmOverloads
+        suspend fun execAsync(
+            command: String,
+            socketPath: String? = null,
+            shell: String = "/system/bin/sh",
+            env: Map<String, String>? = null,
+            cwd: String? = null
+        ): ExecResult = withContext(Dispatchers.IO) {
+            exec(command, socketPath, shell, env, cwd)
         }
     }
 }

@@ -24,8 +24,10 @@ internal object NativePTY {
      * @param rows terminal height in rows
      * @param cols terminal width in cols
      * @param shell the shell binary to launch (e.g. "/system/bin/sh")
+     * @param envVars array of "KEY=VALUE" strings for child environment (null for defaults)
+     * @param cwd working directory for the child process (null for default)
      */
-    external fun nativeStartPTY(rows: Int, cols: Int, shell: String): Int
+    external fun nativeStartPTY(rows: Int, cols: Int, shell: String, envVars: Array<String>?, cwd: String?): Int
 
     /** Read bytes from PTY. Blocks until data available. Returns null on EOF/error. */
     external fun nativeRead(id: Int): ByteArray?
@@ -69,8 +71,12 @@ internal object NativePTY {
      */
     external fun nativeStartExecSession(socketPath: String, command: String, shell: String): Int
 
-    /** Start a local exec session (fork+pipes, no daemon). Returns session ID >= 0, or -1 on failure. */
-    external fun nativeStartLocalExecSession(shell: String, command: String): Int
+    /** Start a local exec session (fork+pipes, no daemon). Returns session ID >= 0, or -1 on failure.
+     *
+     * @param envVars array of "KEY=VALUE" strings for child environment (null for defaults)
+     * @param cwd working directory for the child process (null for default)
+     */
+    external fun nativeStartLocalExecSession(shell: String, command: String, envVars: Array<String>?, cwd: String?): Int
 
     /**
      * Get the exit code from a completed exec session.

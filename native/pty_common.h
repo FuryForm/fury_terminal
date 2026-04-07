@@ -65,37 +65,57 @@ static int set_winsize(int fd, int rows, int cols) {
  *   2. Acquires the slave PTY as controlling terminal (TIOCSCTTY)
  *   3. Redirects stdin/stdout/stderr to the slave PTY
  *   4. Closes all inherited FDs > 2 to prevent master fd leaks
- *   5. Sets up TERM, HOME, PATH environment
- *   6. Execs the shell
- *   7. Calls _exit(127) on failure (never returns to caller's runtime)
+ *   5. Changes to cwd if provided
+ *   6. Sets up TERM, HOME, PATH environment + custom env vars
+ *   7. Execs the shell
+ *   8. Calls _exit(127) on failure (never returns to caller's runtime)
  *
  * @param slave_fd   slave PTY file descriptor
  * @param shell_path path to the shell binary
+ * @param env_pairs  null-terminated array of "KEY=VALUE" strings (may be NULL)
+ * @param cwd        working directory path (may be NULL for default)
  * @return child PID on success, -1 on failure
  */
-static int do_fork_exec(int slave_fd, const char *shell_path) {
+static int do_fork_exec(int slave_fd, const char *shell_path,
+                        const char **env_pairs, const char *cwd) {
     pid_t pid = fork();
     if (pid < 0) return -1;
     if (pid == 0) {
         /* Child process — pure C, no runtime dependencies */
         setsid();
-        /* Acquire slave PTY as controlling terminal.
-         * Without this, /dev/tty doesn't exist and the shell warns
-         * "no controlling tty". Control characters (Ctrl+C → SIGINT)
-         * also won't work via the line discipline without a ctty. */
         ioctl(slave_fd, TIOCSCTTY, 0);
         dup2(slave_fd, 0);
         dup2(slave_fd, 1);
         dup2(slave_fd, 2);
         if (slave_fd > 2) close(slave_fd);
-        /* Close all inherited FDs except stdin/stdout/stderr to prevent
-         * leaking master FDs from other sessions into the child. */
+        /* Close all inherited FDs except stdin/stdout/stderr */
         int maxfd = (int)sysconf(_SC_OPEN_MAX);
         if (maxfd < 0) maxfd = 256;
         for (int fd = 3; fd < maxfd; fd++) close(fd);
+        /* Change working directory if specified */
+        if (cwd && cwd[0] != '\0') {
+            chdir(cwd); /* best-effort; ignore failure (dir may not exist) */
+        }
+        /* Set default environment */
         setenv("TERM", "xterm-256color", 1);
         setenv("HOME", "/data/local/tmp", 0);
         setenv("PATH", "/product/bin:/sbin:/vendor/bin:/system/sbin:/system/bin:/system/xbin:/system/bin/applets", 1);
+        /* Apply custom environment variables (overrides defaults) */
+        if (env_pairs) {
+            for (int i = 0; env_pairs[i] != NULL; i++) {
+                /* Each entry is "KEY=VALUE"; find the '=' */
+                const char *eq = strchr(env_pairs[i], '=');
+                if (eq && eq != env_pairs[i]) {
+                    size_t key_len = (size_t)(eq - env_pairs[i]);
+                    char key[256];
+                    if (key_len < sizeof(key)) {
+                        memcpy(key, env_pairs[i], key_len);
+                        key[key_len] = '\0';
+                        setenv(key, eq + 1, 1);
+                    }
+                }
+            }
+        }
         execlp(shell_path, shell_path, (char *)NULL);
         _exit(127);
     }

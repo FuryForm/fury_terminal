@@ -221,6 +221,8 @@ static void do_close_pty(int id) {
         ptys[id].is_local_exec = 0;
         ptys[id].daemon_alive = 0;
         ptys[id].exit_code    = -1;
+        /* NOTE: callers must cache exit_code before calling do_close_pty,
+         * since this wipes the slot. The Kotlin layer does this in close(). */
     }
     pthread_mutex_unlock(&ptys_mutex);
 
@@ -273,21 +275,65 @@ static void do_close_pty(int id) {
 /* =================== JNI FUNCTIONS =================== */
 
 JNIEXPORT jint JNICALL
-Java_com_furyform_terminal_NativePTY_nativeStartPTY(JNIEnv *env, jobject thiz,
-        jint rows, jint cols, jstring jShell) {
+Java_com_furyform_terminal_NativePTY_nativeStartPTY(
+        JNIEnv *env, jobject thiz, jint rows, jint cols, jstring jShell,
+        jobjectArray jEnvVars, jstring jCwd) {
     const char *shell = (*env)->GetStringUTFChars(env, jShell, NULL);
+    const char *cwd = jCwd ? (*env)->GetStringUTFChars(env, jCwd, NULL) : NULL;
+
+    /* Convert Java String[] to C char*[] for env vars */
+    int env_count = jEnvVars ? (*env)->GetArrayLength(env, jEnvVars) : 0;
+    const char **env_pairs = NULL;
+    jstring *env_jstrings = NULL;
+    if (env_count > 0) {
+        env_pairs = (const char **)malloc(sizeof(char *) * (env_count + 1));
+        env_jstrings = (jstring *)malloc(sizeof(jstring) * env_count);
+        if (env_pairs && env_jstrings) {
+            for (int i = 0; i < env_count; i++) {
+                env_jstrings[i] = (jstring)(*env)->GetObjectArrayElement(env, jEnvVars, i);
+                env_pairs[i] = (*env)->GetStringUTFChars(env, env_jstrings[i], NULL);
+            }
+            env_pairs[env_count] = NULL;
+        } else {
+            free(env_pairs); free(env_jstrings);
+            env_pairs = NULL; env_jstrings = NULL;
+            env_count = 0;
+        }
+    }
+
     int master, slave;
     if (my_openpty(&master, &slave) != 0) {
         (*env)->ReleaseStringUTFChars(env, jShell, shell);
+        if (cwd) (*env)->ReleaseStringUTFChars(env, jCwd, cwd);
+        if (env_pairs) {
+            for (int i = 0; i < env_count; i++)
+                (*env)->ReleaseStringUTFChars(env, env_jstrings[i], env_pairs[i]);
+            free(env_pairs); free(env_jstrings);
+        }
         return -1;
     }
     if (set_winsize(master, (int)rows, (int)cols) != 0) {
         (*env)->ReleaseStringUTFChars(env, jShell, shell);
+        if (cwd) (*env)->ReleaseStringUTFChars(env, jCwd, cwd);
+        if (env_pairs) {
+            for (int i = 0; i < env_count; i++)
+                (*env)->ReleaseStringUTFChars(env, env_jstrings[i], env_pairs[i]);
+            free(env_pairs); free(env_jstrings);
+        }
         close(master); close(slave);
         return -1;
     }
-    int pid = do_fork_exec(slave, shell);
+    int pid = do_fork_exec(slave, shell, env_pairs, cwd);
+
+    /* Release all JNI strings */
     (*env)->ReleaseStringUTFChars(env, jShell, shell);
+    if (cwd) (*env)->ReleaseStringUTFChars(env, jCwd, cwd);
+    if (env_pairs) {
+        for (int i = 0; i < env_count; i++)
+            (*env)->ReleaseStringUTFChars(env, env_jstrings[i], env_pairs[i]);
+        free(env_pairs); free(env_jstrings);
+    }
+
     if (pid < 0) { close(master); close(slave); return -1; }
     close(slave);
     int id = store_pty(master, pid);
@@ -371,15 +417,43 @@ Java_com_furyform_terminal_NativePTY_nativeStartExecSession(
  */
 JNIEXPORT jint JNICALL
 Java_com_furyform_terminal_NativePTY_nativeStartLocalExecSession(
-        JNIEnv *env, jobject thiz, jstring jShell, jstring jCommand) {
+        JNIEnv *env, jobject thiz, jstring jShell, jstring jCommand,
+        jobjectArray jEnvVars, jstring jCwd) {
     const char *shell = (*env)->GetStringUTFChars(env, jShell, NULL);
     const char *cmd = (*env)->GetStringUTFChars(env, jCommand, NULL);
+    const char *cwd = jCwd ? (*env)->GetStringUTFChars(env, jCwd, NULL) : NULL;
+
+    /* Convert Java String[] to C char*[] for env vars */
+    int env_count = jEnvVars ? (*env)->GetArrayLength(env, jEnvVars) : 0;
+    const char **env_pairs = NULL;
+    jstring *env_jstrings = NULL;
+    if (env_count > 0) {
+        env_pairs = (const char **)malloc(sizeof(char *) * (env_count + 1));
+        env_jstrings = (jstring *)malloc(sizeof(jstring) * env_count);
+        if (env_pairs && env_jstrings) {
+            for (int i = 0; i < env_count; i++) {
+                env_jstrings[i] = (jstring)(*env)->GetObjectArrayElement(env, jEnvVars, i);
+                env_pairs[i] = (*env)->GetStringUTFChars(env, env_jstrings[i], NULL);
+            }
+            env_pairs[env_count] = NULL;
+        } else {
+            free(env_pairs); free(env_jstrings);
+            env_pairs = NULL; env_jstrings = NULL;
+            env_count = 0;
+        }
+    }
 
     /* Create pipes: stdout_pipe for stdout+stderr */
     int stdout_pipe[2]; /* [0]=read, [1]=write */
     if (pipe(stdout_pipe) < 0) {
         (*env)->ReleaseStringUTFChars(env, jShell, shell);
         (*env)->ReleaseStringUTFChars(env, jCommand, cmd);
+        if (cwd) (*env)->ReleaseStringUTFChars(env, jCwd, cwd);
+        if (env_pairs) {
+            for (int i = 0; i < env_count; i++)
+                (*env)->ReleaseStringUTFChars(env, env_jstrings[i], env_pairs[i]);
+            free(env_pairs); free(env_jstrings);
+        }
         return -1;
     }
 
@@ -388,15 +462,21 @@ Java_com_furyform_terminal_NativePTY_nativeStartLocalExecSession(
         close(stdout_pipe[0]); close(stdout_pipe[1]);
         (*env)->ReleaseStringUTFChars(env, jShell, shell);
         (*env)->ReleaseStringUTFChars(env, jCommand, cmd);
+        if (cwd) (*env)->ReleaseStringUTFChars(env, jCwd, cwd);
+        if (env_pairs) {
+            for (int i = 0; i < env_count; i++)
+                (*env)->ReleaseStringUTFChars(env, env_jstrings[i], env_pairs[i]);
+            free(env_pairs); free(env_jstrings);
+        }
         return -1;
     }
 
     if (pid == 0) {
         /* Child: wire up pipes and exec */
-        setsid(); /* New session so kill(-pid) reaches all descendants (e.g. su → sh → ping) */
-        close(stdout_pipe[0]); /* parent reads this end */
-        dup2(stdout_pipe[1], 1);  /* stdout to pipe */
-        dup2(stdout_pipe[1], 2);  /* stderr to same pipe */
+        setsid();
+        close(stdout_pipe[0]);
+        dup2(stdout_pipe[1], 1);
+        dup2(stdout_pipe[1], 2);
         close(stdout_pipe[1]);
 
         /* Close all FDs > 2 */
@@ -404,19 +484,45 @@ Java_com_furyform_terminal_NativePTY_nativeStartLocalExecSession(
         if (maxfd < 0) maxfd = 256;
         for (int fd = 3; fd < maxfd; fd++) close(fd);
 
+        /* Change working directory if specified */
+        if (cwd && cwd[0] != '\0') {
+            chdir(cwd);
+        }
+
         /* Set environment */
         setenv("PATH", "/product/bin:/sbin:/vendor/bin:/system/sbin:/system/bin:/system/xbin:/system/bin/applets", 1);
         setenv("HOME", "/data/local/tmp", 0);
 
-        /* Use sh -c to support pipes, redirects, etc. */
+        /* Apply custom environment variables */
+        if (env_pairs) {
+            for (int i = 0; env_pairs[i] != NULL; i++) {
+                const char *eq = strchr(env_pairs[i], '=');
+                if (eq && eq != env_pairs[i]) {
+                    size_t key_len = (size_t)(eq - env_pairs[i]);
+                    char key[256];
+                    if (key_len < sizeof(key)) {
+                        memcpy(key, env_pairs[i], key_len);
+                        key[key_len] = '\0';
+                        setenv(key, eq + 1, 1);
+                    }
+                }
+            }
+        }
+
         execlp(shell, shell, "-c", cmd, (char *)NULL);
         _exit(127);
     }
 
     /* Parent */
-    close(stdout_pipe[1]); /* we read from stdout_pipe[0] */
+    close(stdout_pipe[1]);
     (*env)->ReleaseStringUTFChars(env, jShell, shell);
     (*env)->ReleaseStringUTFChars(env, jCommand, cmd);
+    if (cwd) (*env)->ReleaseStringUTFChars(env, jCwd, cwd);
+    if (env_pairs) {
+        for (int i = 0; i < env_count; i++)
+            (*env)->ReleaseStringUTFChars(env, env_jstrings[i], env_pairs[i]);
+        free(env_pairs); free(env_jstrings);
+    }
 
     int id = store_local_exec(stdout_pipe[0], pid);
     if (id < 0) {
@@ -535,17 +641,15 @@ Java_com_furyform_terminal_NativePTY_nativeIsAlive(JNIEnv *env, jobject thiz, ji
         pthread_mutex_lock(&ptys_mutex);
         if ((int)id >= 0 && (int)id < MAX_PTYS && ptys[(int)id].in_use && ptys[(int)id].pid == pid) {
             ptys[(int)id].pid = -1;
-            if (ptys[(int)id].is_local_exec) {
-                int exit_code;
-                if (WIFEXITED(status)) {
-                    exit_code = WEXITSTATUS(status);
-                } else if (WIFSIGNALED(status)) {
-                    exit_code = 128 + WTERMSIG(status);
-                } else {
-                    exit_code = -1;
-                }
-                ptys[(int)id].exit_code = exit_code;
+            int exit_code;
+            if (WIFEXITED(status)) {
+                exit_code = WEXITSTATUS(status);
+            } else if (WIFSIGNALED(status)) {
+                exit_code = 128 + WTERMSIG(status);
+            } else {
+                exit_code = -1;
             }
+            ptys[(int)id].exit_code = exit_code;
         }
         pthread_mutex_unlock(&ptys_mutex);
         return JNI_FALSE;
@@ -559,12 +663,13 @@ Java_com_furyform_terminal_NativePTY_nativeGetExitCode(JNIEnv *env, jobject thiz
     int code = get_exit_code((int)id);
     if (code >= 0) return (jint)code;
 
-    /* For local exec sessions, reap the child (blocking) to get exit code.
-     * This is called after readAll() which means the pipe is at EOF and
-     * the child is exiting or already exited — blocking waitpid returns fast. */
+    /* Reap the child (blocking) to get exit code.
+     * For exec sessions this is called after readAll() (pipe at EOF).
+     * For PTY sessions this is called after output EOF / process death.
+     * The child is exiting or already exited — blocking waitpid returns fast. */
     if ((int)id >= 0 && (int)id < MAX_PTYS) {
         pthread_mutex_lock(&ptys_mutex);
-        int pid = ptys[(int)id].in_use && ptys[(int)id].is_local_exec ? ptys[(int)id].pid : -1;
+        int pid = ptys[(int)id].in_use ? ptys[(int)id].pid : -1;
         pthread_mutex_unlock(&ptys_mutex);
 
         if (pid > 0) {
@@ -588,6 +693,10 @@ Java_com_furyform_terminal_NativePTY_nativeGetExitCode(JNIEnv *env, jobject thiz
                 pthread_mutex_unlock(&ptys_mutex);
                 return (jint)exit_code;
             }
+            /* waitpid failed (ECHILD) — child may have been reaped by
+             * nativeIsAlive on another thread. Re-check stored exit code. */
+            code = get_exit_code((int)id);
+            if (code >= 0) return (jint)code;
         }
     }
     return (jint)code;
