@@ -70,61 +70,19 @@ static void init_ptys(void) {
     }
 }
 
-static int store_pty(int master, int pid) {
+static int store_session(int fd, int pid, int is_daemon, int is_local_exec) {
     pthread_once(&ptys_once, init_ptys);
     pthread_mutex_lock(&ptys_mutex);
     int id = -1;
     for (int i = 0; i < MAX_PTYS; i++) {
         if (!ptys[i].in_use) {
-            ptys[i].master       = master;
-            ptys[i].pid          = pid;
-            ptys[i].in_use       = 1;
-            ptys[i].is_daemon    = 0;
-            ptys[i].is_local_exec = 0;
-            ptys[i].daemon_alive = 0;
-            ptys[i].exit_code    = -1;
-            id = i;
-            break;
-        }
-    }
-    pthread_mutex_unlock(&ptys_mutex);
-    return id;
-}
-
-static int store_local_exec(int pipe_fd, int pid) {
-    pthread_once(&ptys_once, init_ptys);
-    pthread_mutex_lock(&ptys_mutex);
-    int id = -1;
-    for (int i = 0; i < MAX_PTYS; i++) {
-        if (!ptys[i].in_use) {
-            ptys[i].master       = pipe_fd;
-            ptys[i].pid          = pid;
-            ptys[i].in_use       = 1;
-            ptys[i].is_daemon    = 0;
-            ptys[i].is_local_exec = 1;
-            ptys[i].daemon_alive = 0;
-            ptys[i].exit_code    = -1;
-            id = i;
-            break;
-        }
-    }
-    pthread_mutex_unlock(&ptys_mutex);
-    return id;
-}
-
-static int store_daemon_session(int sock_fd) {
-    pthread_once(&ptys_once, init_ptys);
-    pthread_mutex_lock(&ptys_mutex);
-    int id = -1;
-    for (int i = 0; i < MAX_PTYS; i++) {
-        if (!ptys[i].in_use) {
-            ptys[i].master       = sock_fd;
-            ptys[i].pid          = -1;
-            ptys[i].in_use       = 1;
-            ptys[i].is_daemon    = 1;
-            ptys[i].is_local_exec = 0;
-            ptys[i].daemon_alive = 1;
-            ptys[i].exit_code    = -1;
+            ptys[i].master        = fd;
+            ptys[i].pid           = pid;
+            ptys[i].in_use        = 1;
+            ptys[i].is_daemon     = is_daemon;
+            ptys[i].is_local_exec = is_local_exec;
+            ptys[i].daemon_alive  = is_daemon ? 1 : 0;
+            ptys[i].exit_code     = -1;
             id = i;
             break;
         }
@@ -190,20 +148,55 @@ static int get_exit_code(int id) {
     return c;
 }
 
-/* =================== READ / CLOSE =================== */
+/* =================== JNI STRING ARRAY HELPERS =================== */
 
-typedef struct { char *data; int length; } read_result;
+typedef struct {
+    const char **strs;   /* C string pointers (null-terminated array) */
+    jstring *jstrs;      /* JNI string refs for cleanup */
+    int count;
+} jni_string_array;
 
-static read_result do_read(int fd, int buf_size) {
-    read_result r = { NULL, 0 };
-    char *buf = (char *)malloc(buf_size);
-    if (!buf) return r;
-    ssize_t n = read(fd, buf, buf_size);
-    if (n <= 0) { free(buf); return r; }
-    r.data   = buf;
-    r.length = (int)n;
-    return r;
+/**
+ * Convert a Java String[] to C char*[] via GetStringUTFChars.
+ * Returns array with count=0 if input is NULL or empty.
+ * Caller must release via jni_release_string_array().
+ */
+static jni_string_array jni_get_string_array(JNIEnv *env, jobjectArray arr) {
+    jni_string_array sa = { NULL, NULL, 0 };
+    if (!arr) return sa;
+    int count = (*env)->GetArrayLength(env, arr);
+    if (count <= 0) return sa;
+    if (count > 16) (*env)->EnsureLocalCapacity(env, count);
+    sa.strs = (const char **)malloc(sizeof(char *) * (count + 1));
+    sa.jstrs = (jstring *)malloc(sizeof(jstring) * count);
+    if (!sa.strs || !sa.jstrs) {
+        free(sa.strs); free(sa.jstrs);
+        sa.strs = NULL; sa.jstrs = NULL;
+        return sa;
+    }
+    for (int i = 0; i < count; i++) {
+        sa.jstrs[i] = (jstring)(*env)->GetObjectArrayElement(env, arr, i);
+        sa.strs[i] = (*env)->GetStringUTFChars(env, sa.jstrs[i], NULL);
+    }
+    sa.strs[count] = NULL;
+    sa.count = count;
+    return sa;
 }
+
+/** Release all JNI string refs and free arrays. Safe to call on empty/zeroed struct. */
+static void jni_release_string_array(JNIEnv *env, jni_string_array *sa) {
+    if (!sa->strs || !sa->jstrs) return;
+    for (int i = 0; i < sa->count; i++) {
+        (*env)->ReleaseStringUTFChars(env, sa->jstrs[i], sa->strs[i]);
+    }
+    free(sa->strs);
+    free(sa->jstrs);
+    sa->strs = NULL;
+    sa->jstrs = NULL;
+    sa->count = 0;
+}
+
+/* =================== READ / CLOSE =================== */
 
 static void do_close_pty(int id) {
     int master = -1, pid = -1, is_daemon = 0, is_local_exec = 0;
@@ -240,34 +233,14 @@ static void do_close_pty(int id) {
          * fall back to pid if the process group doesn't exist (ESRCH). */
         if (master >= 0) close(master);
         if (pid > 0) {
-            int status;
-            if (waitpid(pid, &status, WNOHANG) == 0) {
-                if (kill(-pid, SIGTERM) != 0 && errno == ESRCH)
-                    kill(pid, SIGTERM);
-                usleep(100000);
-                if (waitpid(pid, &status, WNOHANG) == 0) {
-                    if (kill(-pid, SIGKILL) != 0 && errno == ESRCH)
-                        kill(pid, SIGKILL);
-                    waitpid(pid, &status, 0);
-                }
-            }
+            kill_escalate(pid, 0); /* start with SIGTERM for exec */
         }
         return;
     }
 
     /* Local PTY: escalating kill (process group, ESRCH fallback) */
     if (pid > 0) {
-        int status;
-        if (kill(-pid, SIGHUP) != 0 && errno == ESRCH) kill(pid, SIGHUP);
-        usleep(100000);
-        if (waitpid(pid, &status, WNOHANG) == 0) {
-            if (kill(-pid, SIGTERM) != 0 && errno == ESRCH) kill(pid, SIGTERM);
-            usleep(100000);
-            if (waitpid(pid, &status, WNOHANG) == 0) {
-                if (kill(-pid, SIGKILL) != 0 && errno == ESRCH) kill(pid, SIGKILL);
-                waitpid(pid, &status, 0);
-            }
-        }
+        kill_escalate(pid, 1); /* start with SIGHUP for PTY */
     }
     if (master >= 0) close(master);
 }
@@ -281,63 +254,32 @@ Java_com_furyform_terminal_NativePTY_nativeStartPTY(
     const char *shell = (*env)->GetStringUTFChars(env, jShell, NULL);
     const char *cwd = jCwd ? (*env)->GetStringUTFChars(env, jCwd, NULL) : NULL;
 
-    /* Convert Java String[] to C char*[] for env vars */
-    int env_count = jEnvVars ? (*env)->GetArrayLength(env, jEnvVars) : 0;
-    const char **env_pairs = NULL;
-    jstring *env_jstrings = NULL;
-    if (env_count > 0) {
-        if (env_count > 16) (*env)->EnsureLocalCapacity(env, env_count);
-        env_pairs = (const char **)malloc(sizeof(char *) * (env_count + 1));
-        env_jstrings = (jstring *)malloc(sizeof(jstring) * env_count);
-        if (env_pairs && env_jstrings) {
-            for (int i = 0; i < env_count; i++) {
-                env_jstrings[i] = (jstring)(*env)->GetObjectArrayElement(env, jEnvVars, i);
-                env_pairs[i] = (*env)->GetStringUTFChars(env, env_jstrings[i], NULL);
-            }
-            env_pairs[env_count] = NULL;
-        } else {
-            free(env_pairs); free(env_jstrings);
-            env_pairs = NULL; env_jstrings = NULL;
-            env_count = 0;
-        }
-    }
+    jni_string_array env_sa = jni_get_string_array(env, jEnvVars);
 
     int master, slave;
     if (my_openpty(&master, &slave) != 0) {
         (*env)->ReleaseStringUTFChars(env, jShell, shell);
         if (cwd) (*env)->ReleaseStringUTFChars(env, jCwd, cwd);
-        if (env_pairs) {
-            for (int i = 0; i < env_count; i++)
-                (*env)->ReleaseStringUTFChars(env, env_jstrings[i], env_pairs[i]);
-            free(env_pairs); free(env_jstrings);
-        }
+        jni_release_string_array(env, &env_sa);
         return -1;
     }
     if (set_winsize(master, (int)rows, (int)cols) != 0) {
         (*env)->ReleaseStringUTFChars(env, jShell, shell);
         if (cwd) (*env)->ReleaseStringUTFChars(env, jCwd, cwd);
-        if (env_pairs) {
-            for (int i = 0; i < env_count; i++)
-                (*env)->ReleaseStringUTFChars(env, env_jstrings[i], env_pairs[i]);
-            free(env_pairs); free(env_jstrings);
-        }
+        jni_release_string_array(env, &env_sa);
         close(master); close(slave);
         return -1;
     }
-    int pid = do_fork_exec(slave, shell, env_pairs, cwd);
+    int pid = do_fork_exec(slave, shell, env_sa.strs, cwd);
 
     /* Release all JNI strings */
     (*env)->ReleaseStringUTFChars(env, jShell, shell);
     if (cwd) (*env)->ReleaseStringUTFChars(env, jCwd, cwd);
-    if (env_pairs) {
-        for (int i = 0; i < env_count; i++)
-            (*env)->ReleaseStringUTFChars(env, env_jstrings[i], env_pairs[i]);
-        free(env_pairs); free(env_jstrings);
-    }
+    jni_release_string_array(env, &env_sa);
 
     if (pid < 0) { close(master); close(slave); return -1; }
     close(slave);
-    int id = store_pty(master, pid);
+    int id = store_session(master, pid, 0, 0);
     if (id < 0) {
         if (kill(-pid, SIGKILL) != 0 && errno == ESRCH)
             kill(pid, SIGKILL);
@@ -360,36 +302,18 @@ Java_com_furyform_terminal_NativePTY_nativeStartDaemonSession(
     const char *shell = (*env)->GetStringUTFChars(env, jShell, NULL);
     const char *cwd = jCwd ? (*env)->GetStringUTFChars(env, jCwd, NULL) : NULL;
 
-    /* Convert Java String[] env vars */
-    int env_count = jEnvVars ? (*env)->GetArrayLength(env, jEnvVars) : 0;
-    const char **env_strs = NULL;
-    jstring *env_jstrings = NULL;
-    if (env_count > 0) {
-        if (env_count > 16) (*env)->EnsureLocalCapacity(env, env_count);
-        env_strs = (const char **)malloc(sizeof(char *) * env_count);
-        env_jstrings = (jstring *)malloc(sizeof(jstring) * env_count);
-        if (env_strs && env_jstrings) {
-            for (int i = 0; i < env_count; i++) {
-                env_jstrings[i] = (jstring)(*env)->GetObjectArrayElement(env, jEnvVars, i);
-                env_strs[i] = (*env)->GetStringUTFChars(env, env_jstrings[i], NULL);
-            }
-        } else {
-            free(env_strs); free(env_jstrings);
-            env_strs = NULL; env_jstrings = NULL;
-            env_count = 0;
-        }
-    }
+    jni_string_array env_sa = jni_get_string_array(env, jEnvVars);
 
     /* Build extended RESIZE payload: [rows:2][cols:2][shell\0cwd\0env1\0env2\0...] */
-    int has_extended = (shell[0] != '\0') || (cwd && cwd[0] != '\0') || env_count > 0;
+    int has_extended = (shell[0] != '\0') || (cwd && cwd[0] != '\0') || env_sa.count > 0;
     uint32_t payload_len = 4; /* rows + cols */
 
     if (has_extended) {
         uint32_t shell_len = (uint32_t)strlen(shell);
         uint32_t cwd_len = cwd ? (uint32_t)strlen(cwd) : 0;
         payload_len += shell_len + 1 + cwd_len + 1; /* shell\0cwd\0 */
-        for (int i = 0; i < env_count; i++) {
-            payload_len += (uint32_t)strlen(env_strs[i]) + 1; /* envN\0 */
+        for (int i = 0; i < env_sa.count; i++) {
+            payload_len += (uint32_t)strlen(env_sa.strs[i]) + 1; /* envN\0 */
         }
     }
 
@@ -397,11 +321,7 @@ Java_com_furyform_terminal_NativePTY_nativeStartDaemonSession(
     if (!payload) {
         (*env)->ReleaseStringUTFChars(env, jShell, shell);
         if (cwd) (*env)->ReleaseStringUTFChars(env, jCwd, cwd);
-        if (env_strs) {
-            for (int i = 0; i < env_count; i++)
-                (*env)->ReleaseStringUTFChars(env, env_jstrings[i], env_strs[i]);
-            free(env_strs); free(env_jstrings);
-        }
+        jni_release_string_array(env, &env_sa);
         close(fd);
         return -1;
     }
@@ -425,9 +345,9 @@ Java_com_furyform_terminal_NativePTY_nativeStartDaemonSession(
         }
         payload[off++] = '\0';
 
-        for (int i = 0; i < env_count; i++) {
-            uint32_t elen = (uint32_t)strlen(env_strs[i]);
-            memcpy(payload + off, env_strs[i], elen);
+        for (int i = 0; i < env_sa.count; i++) {
+            uint32_t elen = (uint32_t)strlen(env_sa.strs[i]);
+            memcpy(payload + off, env_sa.strs[i], elen);
             off += elen;
             payload[off++] = '\0';
         }
@@ -439,15 +359,11 @@ Java_com_furyform_terminal_NativePTY_nativeStartDaemonSession(
     /* Release JNI strings */
     (*env)->ReleaseStringUTFChars(env, jShell, shell);
     if (cwd) (*env)->ReleaseStringUTFChars(env, jCwd, cwd);
-    if (env_strs) {
-        for (int i = 0; i < env_count; i++)
-            (*env)->ReleaseStringUTFChars(env, env_jstrings[i], env_strs[i]);
-        free(env_strs); free(env_jstrings);
-    }
+    jni_release_string_array(env, &env_sa);
 
     if (rc < 0) { close(fd); return -1; }
 
-    int id = store_daemon_session(fd);
+    int id = store_session(fd, -1, 1, 0);
     if (id < 0) { close(fd); return -1; }
     return (jint)id;
 }
@@ -465,25 +381,7 @@ Java_com_furyform_terminal_NativePTY_nativeStartExecSession(
     const char *shell = (*env)->GetStringUTFChars(env, jShell, NULL);
     const char *cwd = jCwd ? (*env)->GetStringUTFChars(env, jCwd, NULL) : NULL;
 
-    /* Convert Java String[] env vars */
-    int env_count = jEnvVars ? (*env)->GetArrayLength(env, jEnvVars) : 0;
-    const char **env_strs = NULL;
-    jstring *env_jstrings = NULL;
-    if (env_count > 0) {
-        if (env_count > 16) (*env)->EnsureLocalCapacity(env, env_count);
-        env_strs = (const char **)malloc(sizeof(char *) * env_count);
-        env_jstrings = (jstring *)malloc(sizeof(jstring) * env_count);
-        if (env_strs && env_jstrings) {
-            for (int i = 0; i < env_count; i++) {
-                env_jstrings[i] = (jstring)(*env)->GetObjectArrayElement(env, jEnvVars, i);
-                env_strs[i] = (*env)->GetStringUTFChars(env, env_jstrings[i], NULL);
-            }
-        } else {
-            free(env_strs); free(env_jstrings);
-            env_strs = NULL; env_jstrings = NULL;
-            env_count = 0;
-        }
-    }
+    jni_string_array env_sa = jni_get_string_array(env, jEnvVars);
 
     /* Build EXEC payload: shell\0command[\0cwd[\0env1\0env2\0...]] */
     uint32_t shell_len = (uint32_t)strlen(shell);
@@ -491,11 +389,11 @@ Java_com_furyform_terminal_NativePTY_nativeStartExecSession(
     uint32_t cwd_len = cwd ? (uint32_t)strlen(cwd) : 0;
     uint32_t payload_len = shell_len + 1 + cmd_len; /* shell\0command */
 
-    int has_cwd_or_env = (cwd && cwd[0] != '\0') || env_count > 0;
+    int has_cwd_or_env = (cwd && cwd[0] != '\0') || env_sa.count > 0;
     if (has_cwd_or_env) {
         payload_len += 1 + cwd_len; /* \0cwd */
-        for (int i = 0; i < env_count; i++) {
-            payload_len += 1 + (uint32_t)strlen(env_strs[i]); /* \0envN */
+        for (int i = 0; i < env_sa.count; i++) {
+            payload_len += 1 + (uint32_t)strlen(env_sa.strs[i]); /* \0envN */
         }
     }
 
@@ -504,11 +402,7 @@ Java_com_furyform_terminal_NativePTY_nativeStartExecSession(
         (*env)->ReleaseStringUTFChars(env, jCommand, cmd);
         (*env)->ReleaseStringUTFChars(env, jShell, shell);
         if (cwd) (*env)->ReleaseStringUTFChars(env, jCwd, cwd);
-        if (env_strs) {
-            for (int i = 0; i < env_count; i++)
-                (*env)->ReleaseStringUTFChars(env, env_jstrings[i], env_strs[i]);
-            free(env_strs); free(env_jstrings);
-        }
+        jni_release_string_array(env, &env_sa);
         close(fd);
         return -1;
     }
@@ -526,10 +420,10 @@ Java_com_furyform_terminal_NativePTY_nativeStartExecSession(
             memcpy(payload + off, cwd, cwd_len);
             off += cwd_len;
         }
-        for (int i = 0; i < env_count; i++) {
+        for (int i = 0; i < env_sa.count; i++) {
             payload[off++] = '\0';
-            uint32_t elen = (uint32_t)strlen(env_strs[i]);
-            memcpy(payload + off, env_strs[i], elen);
+            uint32_t elen = (uint32_t)strlen(env_sa.strs[i]);
+            memcpy(payload + off, env_sa.strs[i], elen);
             off += elen;
         }
     }
@@ -539,14 +433,10 @@ Java_com_furyform_terminal_NativePTY_nativeStartExecSession(
     (*env)->ReleaseStringUTFChars(env, jCommand, cmd);
     (*env)->ReleaseStringUTFChars(env, jShell, shell);
     if (cwd) (*env)->ReleaseStringUTFChars(env, jCwd, cwd);
-    if (env_strs) {
-        for (int i = 0; i < env_count; i++)
-            (*env)->ReleaseStringUTFChars(env, env_jstrings[i], env_strs[i]);
-        free(env_strs); free(env_jstrings);
-    }
+    jni_release_string_array(env, &env_sa);
     if (rc < 0) { close(fd); return -1; }
 
-    int id = store_daemon_session(fd);
+    int id = store_session(fd, -1, 1, 0);
     if (id < 0) { close(fd); return -1; }
     return (jint)id;
 }
@@ -565,26 +455,7 @@ Java_com_furyform_terminal_NativePTY_nativeStartLocalExecSession(
     const char *cmd = (*env)->GetStringUTFChars(env, jCommand, NULL);
     const char *cwd = jCwd ? (*env)->GetStringUTFChars(env, jCwd, NULL) : NULL;
 
-    /* Convert Java String[] to C char*[] for env vars */
-    int env_count = jEnvVars ? (*env)->GetArrayLength(env, jEnvVars) : 0;
-    const char **env_pairs = NULL;
-    jstring *env_jstrings = NULL;
-    if (env_count > 0) {
-        if (env_count > 16) (*env)->EnsureLocalCapacity(env, env_count);
-        env_pairs = (const char **)malloc(sizeof(char *) * (env_count + 1));
-        env_jstrings = (jstring *)malloc(sizeof(jstring) * env_count);
-        if (env_pairs && env_jstrings) {
-            for (int i = 0; i < env_count; i++) {
-                env_jstrings[i] = (jstring)(*env)->GetObjectArrayElement(env, jEnvVars, i);
-                env_pairs[i] = (*env)->GetStringUTFChars(env, env_jstrings[i], NULL);
-            }
-            env_pairs[env_count] = NULL;
-        } else {
-            free(env_pairs); free(env_jstrings);
-            env_pairs = NULL; env_jstrings = NULL;
-            env_count = 0;
-        }
-    }
+    jni_string_array env_sa = jni_get_string_array(env, jEnvVars);
 
     /* Create pipes: stdout_pipe for stdout+stderr */
     int stdout_pipe[2]; /* [0]=read, [1]=write */
@@ -592,11 +463,7 @@ Java_com_furyform_terminal_NativePTY_nativeStartLocalExecSession(
         (*env)->ReleaseStringUTFChars(env, jShell, shell);
         (*env)->ReleaseStringUTFChars(env, jCommand, cmd);
         if (cwd) (*env)->ReleaseStringUTFChars(env, jCwd, cwd);
-        if (env_pairs) {
-            for (int i = 0; i < env_count; i++)
-                (*env)->ReleaseStringUTFChars(env, env_jstrings[i], env_pairs[i]);
-            free(env_pairs); free(env_jstrings);
-        }
+        jni_release_string_array(env, &env_sa);
         return -1;
     }
 
@@ -606,11 +473,7 @@ Java_com_furyform_terminal_NativePTY_nativeStartLocalExecSession(
         (*env)->ReleaseStringUTFChars(env, jShell, shell);
         (*env)->ReleaseStringUTFChars(env, jCommand, cmd);
         if (cwd) (*env)->ReleaseStringUTFChars(env, jCwd, cwd);
-        if (env_pairs) {
-            for (int i = 0; i < env_count; i++)
-                (*env)->ReleaseStringUTFChars(env, env_jstrings[i], env_pairs[i]);
-            free(env_pairs); free(env_jstrings);
-        }
+        jni_release_string_array(env, &env_sa);
         return -1;
     }
 
@@ -637,20 +500,7 @@ Java_com_furyform_terminal_NativePTY_nativeStartLocalExecSession(
         setenv("HOME", "/data/local/tmp", 0);
 
         /* Apply custom environment variables */
-        if (env_pairs) {
-            for (int i = 0; env_pairs[i] != NULL; i++) {
-                const char *eq = strchr(env_pairs[i], '=');
-                if (eq && eq != env_pairs[i]) {
-                    size_t key_len = (size_t)(eq - env_pairs[i]);
-                    char key[256];
-                    if (key_len < sizeof(key)) {
-                        memcpy(key, env_pairs[i], key_len);
-                        key[key_len] = '\0';
-                        setenv(key, eq + 1, 1);
-                    }
-                }
-            }
-        }
+        apply_env_pairs(env_sa.strs);
 
         execlp(shell, shell, "-c", cmd, (char *)NULL);
         _exit(127);
@@ -661,13 +511,9 @@ Java_com_furyform_terminal_NativePTY_nativeStartLocalExecSession(
     (*env)->ReleaseStringUTFChars(env, jShell, shell);
     (*env)->ReleaseStringUTFChars(env, jCommand, cmd);
     if (cwd) (*env)->ReleaseStringUTFChars(env, jCwd, cwd);
-    if (env_pairs) {
-        for (int i = 0; i < env_count; i++)
-            (*env)->ReleaseStringUTFChars(env, env_jstrings[i], env_pairs[i]);
-        free(env_pairs); free(env_jstrings);
-    }
+    jni_release_string_array(env, &env_sa);
 
-    int id = store_local_exec(stdout_pipe[0], pid);
+    int id = store_session(stdout_pipe[0], pid, 0, 1);
     if (id < 0) {
         if (kill(-pid, SIGKILL) != 0 && errno == ESRCH)
             kill(pid, SIGKILL);
@@ -697,11 +543,11 @@ Java_com_furyform_terminal_NativePTY_nativeRead(JNIEnv *env, jobject thiz, jint 
         return arr;
     }
 
-    read_result r = do_read(si.fd, 8192);
-    if (!r.data || r.length <= 0) { if (r.data) free(r.data); return NULL; }
-    jbyteArray arr = (*env)->NewByteArray(env, r.length);
-    if (arr) (*env)->SetByteArrayRegion(env, arr, 0, r.length, (jbyte *)r.data);
-    free(r.data);
+    uint8_t buf[8192];
+    ssize_t n = read(si.fd, buf, sizeof(buf));
+    if (n <= 0) return NULL;
+    jbyteArray arr = (*env)->NewByteArray(env, (jsize)n);
+    if (arr) (*env)->SetByteArrayRegion(env, arr, 0, (jsize)n, (jbyte *)buf);
     return arr;
 }
 
@@ -784,14 +630,7 @@ Java_com_furyform_terminal_NativePTY_nativeIsAlive(JNIEnv *env, jobject thiz, ji
         pthread_mutex_lock(&ptys_mutex);
         if ((int)id >= 0 && (int)id < MAX_PTYS && ptys[(int)id].in_use && ptys[(int)id].pid == pid) {
             ptys[(int)id].pid = -1;
-            int exit_code;
-            if (WIFEXITED(status)) {
-                exit_code = WEXITSTATUS(status);
-            } else if (WIFSIGNALED(status)) {
-                exit_code = 128 + WTERMSIG(status);
-            } else {
-                exit_code = -1;
-            }
+            int exit_code = exit_code_from_status(status);
             ptys[(int)id].exit_code = exit_code;
         }
         pthread_mutex_unlock(&ptys_mutex);
@@ -819,14 +658,7 @@ Java_com_furyform_terminal_NativePTY_nativeGetExitCode(JNIEnv *env, jobject thiz
             int status;
             int ret = waitpid(pid, &status, 0); /* blocking — child is done */
             if (ret == pid) {
-                int exit_code;
-                if (WIFEXITED(status)) {
-                    exit_code = WEXITSTATUS(status);
-                } else if (WIFSIGNALED(status)) {
-                    exit_code = 128 + WTERMSIG(status);
-                } else {
-                    exit_code = -1;
-                }
+                int exit_code = exit_code_from_status(status);
                 set_exit_code((int)id, exit_code);
                 /* Clear PID to prevent double-reap */
                 pthread_mutex_lock(&ptys_mutex);

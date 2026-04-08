@@ -10,7 +10,6 @@ package com.furyform.terminal
  * } catch (e: TerminalException) {
  *     when (e) {
  *         is SessionClosedException -> { /* session was already closed */ }
- *         is SessionFullException -> { /* too many concurrent sessions */ }
  *         is DaemonConnectionException -> { /* daemon not running */ }
  *         is NativeException -> { /* native layer error */ }
  *         is WriteException -> { /* write/resize failed */ }
@@ -19,12 +18,6 @@ package com.furyform.terminal
  * ```
  */
 sealed class TerminalException(message: String, cause: Throwable? = null) : RuntimeException(message, cause)
-
-/**
- * All 16 session slots are occupied.
- * Close existing sessions before creating new ones.
- */
-class SessionFullException(message: String = "All session slots are full") : TerminalException(message)
 
 /**
  * Failed to connect to the ftyd daemon.

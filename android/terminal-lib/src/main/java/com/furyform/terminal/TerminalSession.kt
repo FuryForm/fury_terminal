@@ -149,7 +149,9 @@ class TerminalSession private constructor(
             cachedExitCode?.let { return it }
             lock.read {
                 if (closed) return cachedExitCode ?: -1
-                return NativePTY.nativeGetExitCode(id)
+                val code = NativePTY.nativeGetExitCode(id)
+                if (code >= 0) cachedExitCode = code
+                return code
             }
         }
 
@@ -182,10 +184,10 @@ class TerminalSession private constructor(
     fun write(data: ByteArray): Int {
         lock.read {
             if (closed) throw SessionClosedException()
-            val n = NativePTY.nativeWrite(id, data)
-            if (n < 0) throw WriteException(n, "Write failed (returned $n)")
-            return n
         }
+        val n = NativePTY.nativeWrite(id, data)
+        if (n < 0) throw WriteException(n, "Write failed (returned $n)")
+        return n
     }
 
     /**
@@ -202,13 +204,13 @@ class TerminalSession private constructor(
      * Resize the terminal window.
      *
      * @return 0 on success
-     * @throws WriteException if the resize fails
+     * @throws NativeException if the resize fails
      */
     fun resize(rows: Int, cols: Int): Int {
         lock.read {
             if (closed) throw SessionClosedException()
             val rc = NativePTY.nativeResize(id, rows, cols)
-            if (rc < 0) throw WriteException(rc, "Resize failed (returned $rc)")
+            if (rc < 0) throw NativeException(rc, "Resize failed (returned $rc)")
             return rc
         }
     }
@@ -240,15 +242,8 @@ class TerminalSession private constructor(
             if (data != null && data.isNotEmpty()) {
                 emit(data)
             } else {
-                // EOF or error — process likely exited.
-                // Use lock to prevent race with close() overwriting Closed state.
-                lock.read {
-                    if (!closed && _state.value is SessionState.Running) {
-                        val code = NativePTY.nativeGetExitCode(id)
-                        if (code >= 0) cachedExitCode = code
-                        _state.value = SessionState.Exited(code)
-                    }
-                }
+                // EOF or error — process likely exited
+                transitionToExited()
                 break
             }
         }
@@ -312,6 +307,20 @@ class TerminalSession private constructor(
     }
 
     /**
+     * Transition state to [SessionState.Exited] if currently [SessionState.Running].
+     * Uses read-lock to prevent race with [close] overwriting [SessionState.Closed].
+     */
+    private fun transitionToExited() {
+        lock.read {
+            if (!closed && _state.value is SessionState.Running) {
+                val code = NativePTY.nativeGetExitCode(id)
+                if (code >= 0) cachedExitCode = code
+                _state.value = SessionState.Exited(code)
+            }
+        }
+    }
+
+    /**
      * Read all remaining output and return it as a string.
      * Blocks until the process exits (EOF).
      * Useful for exec sessions where you want the complete output at once.
@@ -321,18 +330,15 @@ class TerminalSession private constructor(
     fun readAll(): String {
         val sb = StringBuilder()
         while (true) {
-            val chunk = read() ?: break
+            val chunk = try {
+                read()
+            } catch (_: SessionClosedException) {
+                break
+            } ?: break
             sb.append(String(chunk, Charsets.UTF_8))
         }
-        // Transition to Exited if process has finished.
-        // Use lock to prevent race with close() overwriting Closed state.
-        lock.read {
-            if (!closed && _state.value is SessionState.Running) {
-                val code = NativePTY.nativeGetExitCode(id)
-                if (code >= 0) cachedExitCode = code
-                _state.value = SessionState.Exited(code)
-            }
-        }
+        // Transition to Exited if process has finished
+        transitionToExited()
         return sb.toString()
     }
 
@@ -553,8 +559,6 @@ class TerminalSession private constructor(
          *
          * @see exec for parameter documentation
          */
-        @JvmStatic
-        @JvmOverloads
         suspend fun execAsync(
             command: String,
             socketPath: String? = null,

@@ -24,7 +24,7 @@ class NativePTYTest {
         val future = executor.submit(Callable { NativePTY.nativeRead(id) })
         return try {
             future.get(timeoutMs, TimeUnit.MILLISECONDS)
-        } catch (_: Exception) {
+        } catch (_: java.util.concurrent.TimeoutException) {
             future.cancel(true)
             null
         }

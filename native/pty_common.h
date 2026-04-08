@@ -57,6 +57,68 @@ static int set_winsize(int fd, int rows, int cols) {
 }
 
 /**
+ * Apply KEY=VALUE environment pairs via setenv().
+ * Call only in child process after fork, before exec.
+ * @param pairs null-terminated array of "KEY=VALUE" strings (may be NULL)
+ */
+static inline void apply_env_pairs(const char **pairs) {
+    if (!pairs) return;
+    for (int i = 0; pairs[i] != NULL; i++) {
+        const char *eq = strchr(pairs[i], '=');
+        if (eq && eq != pairs[i]) {
+            size_t key_len = (size_t)(eq - pairs[i]);
+            char key[256];
+            if (key_len < sizeof(key)) {
+                memcpy(key, pairs[i], key_len);
+                key[key_len] = '\0';
+                setenv(key, eq + 1, 1);
+            }
+        }
+    }
+}
+
+/**
+ * Convert waitpid status to exit code.
+ * @return exit code (0-255), 128+signal for signaled, -1 for unknown
+ */
+static inline int exit_code_from_status(int status) {
+    if (WIFEXITED(status)) return WEXITSTATUS(status);
+    if (WIFSIGNALED(status)) return 128 + WTERMSIG(status);
+    return -1;
+}
+
+/**
+ * Escalating kill: SIGHUP → SIGTERM → SIGKILL with waits between.
+ * Sends to process group (-pid) first, falls back to direct pid on ESRCH.
+ * @param pid process/group to kill
+ * @param start_with_hup if true, start with SIGHUP (for PTY); if false, start with SIGTERM (for exec)
+ */
+static inline void kill_escalate(pid_t pid, int start_with_hup) {
+    int status;
+    if (start_with_hup) {
+        if (kill(-pid, SIGHUP) != 0 && errno == ESRCH) kill(pid, SIGHUP);
+        usleep(100000);
+        if (waitpid(pid, &status, WNOHANG) == 0) {
+            if (kill(-pid, SIGTERM) != 0 && errno == ESRCH) kill(pid, SIGTERM);
+            usleep(100000);
+            if (waitpid(pid, &status, WNOHANG) == 0) {
+                if (kill(-pid, SIGKILL) != 0 && errno == ESRCH) kill(pid, SIGKILL);
+                waitpid(pid, &status, 0);
+            }
+        }
+    } else {
+        if (waitpid(pid, &status, WNOHANG) == 0) {
+            if (kill(-pid, SIGTERM) != 0 && errno == ESRCH) kill(pid, SIGTERM);
+            usleep(100000);
+            if (waitpid(pid, &status, WNOHANG) == 0) {
+                if (kill(-pid, SIGKILL) != 0 && errno == ESRCH) kill(pid, SIGKILL);
+                waitpid(pid, &status, 0);
+            }
+        }
+    }
+}
+
+/**
  * Fork and exec a shell process connected to the given slave PTY.
  *
  * This is pure C — safe to call from any runtime (Go, Rust, JVM).
@@ -101,21 +163,7 @@ static int do_fork_exec(int slave_fd, const char *shell_path,
         setenv("HOME", "/data/local/tmp", 0);
         setenv("PATH", "/product/bin:/sbin:/vendor/bin:/system/sbin:/system/bin:/system/xbin:/system/bin/applets", 1);
         /* Apply custom environment variables (overrides defaults) */
-        if (env_pairs) {
-            for (int i = 0; env_pairs[i] != NULL; i++) {
-                /* Each entry is "KEY=VALUE"; find the '=' */
-                const char *eq = strchr(env_pairs[i], '=');
-                if (eq && eq != env_pairs[i]) {
-                    size_t key_len = (size_t)(eq - env_pairs[i]);
-                    char key[256];
-                    if (key_len < sizeof(key)) {
-                        memcpy(key, env_pairs[i], key_len);
-                        key[key_len] = '\0';
-                        setenv(key, eq + 1, 1);
-                    }
-                }
-            }
-        }
+        apply_env_pairs(env_pairs);
         execlp(shell_path, shell_path, (char *)NULL);
         _exit(127);
     }

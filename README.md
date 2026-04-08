@@ -19,7 +19,7 @@ A native PTY (pseudo-terminal) library for Android, powered by pure C and the An
 - **Local exec** — fork+pipe exec without root or daemon (runs as app UID)
 - **Custom shell** — configurable shell binary for all session types
 - **UID authentication** — optional SO_PEERCRED-based allowlist for daemon connections (disabled by default)
-- **Typed exceptions** — sealed `TerminalException` hierarchy (`SessionFullException`, `DaemonConnectionException`, `SessionClosedException`, `NativeException`, `WriteException`)
+- **Typed exceptions** — sealed `TerminalException` hierarchy (`DaemonConnectionException`, `SessionClosedException`, `NativeException`, `WriteException`)
 - **Environment variables & working directory** — `env` and `cwd` parameters for all session types (local and daemon)
 - **Session lifecycle StateFlow** — observable `state: StateFlow<SessionState>` (`Running` → `Exited` → `Closed`)
 - **Suspend helpers** — `execAsync()`, `readText()`, `readAll(timeout: Duration)`
@@ -230,8 +230,8 @@ val output = session.readAll(timeout = 5.seconds)
 try {
     val session = TerminalSession.create()
     session.write("hello\n")
-} catch (e: SessionFullException) {
-    // All 16 session slots are in use
+} catch (e: NativeException) {
+    // Native error (e.g., all 16 session slots in use)
 } catch (e: SessionClosedException) {
     // Session was already closed
 } catch (e: WriteException) {

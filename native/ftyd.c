@@ -262,6 +262,12 @@ static int exec_table_wait(int slot, pid_t pid, int *status) {
     while (!__atomic_load_n(&exec_table.entries[slot].ready, __ATOMIC_ACQUIRE)) {
         usleep(1000); /* 1ms — child is already dead, won't spin long */
         if (++waited > 5000) { /* 5 second timeout */
+            /* Check one last time — handler may have just set it */
+            if (__atomic_load_n(&exec_table.entries[slot].ready, __ATOMIC_ACQUIRE)) {
+                *status = __atomic_load_n(&exec_table.entries[slot].status, __ATOMIC_ACQUIRE);
+                __atomic_store_n(&exec_table.entries[slot].pid, 0, __ATOMIC_RELEASE);
+                return 0;
+            }
             LOGE("exec_table_wait: timeout waiting for PID %d, falling back to waitpid\n", pid);
             __atomic_store_n(&exec_table.entries[slot].pid, 0, __ATOMIC_RELEASE);
             /* Try direct waitpid as fallback */
@@ -507,17 +513,7 @@ cleanup:
     /* Kill the shell first — this causes master_fd to get EOF,
      * which unblocks the reader thread's read(master_fd). */
     if (shell_pid > 0) {
-        int status;
-        if (kill(-shell_pid, SIGHUP) != 0 && errno == ESRCH) kill(shell_pid, SIGHUP);
-        usleep(100000);
-        if (waitpid(shell_pid, &status, WNOHANG) == 0) {
-            if (kill(-shell_pid, SIGTERM) != 0 && errno == ESRCH) kill(shell_pid, SIGTERM);
-            usleep(100000);
-            if (waitpid(shell_pid, &status, WNOHANG) == 0) {
-                if (kill(-shell_pid, SIGKILL) != 0 && errno == ESRCH) kill(shell_pid, SIGKILL);
-                waitpid(shell_pid, &status, 0);
-            }
-        }
+        kill_escalate(shell_pid, 1); /* start with SIGHUP for PTY */
     }
 
     /* Close master fd to ensure reader thread gets EOF if shell kill
@@ -662,19 +658,8 @@ static void handle_exec(int client_fd, const char *shell_path,
         return;
     }
 
-    /* Copy command to mutable null-terminated string */
-    size_t command_len = strlen(command_str);
-    char *command = (char *)malloc(command_len + 1);
-    if (!command) {
-        LOGE("Client fd=%d: malloc failed for exec command\n", client_fd);
-        proto_send(client_fd, FTYD_CLOSE, NULL, 0);
-        close(client_fd);
-        return;
-    }
-    memcpy(command, command_str, command_len + 1);
-
     LOGI("Client fd=%d: EXEC shell='%s' cmd='%s' cwd='%s' env_count=%d\n",
-         client_fd, exec_shell, command,
+         client_fd, exec_shell, command_str,
          exec_cwd ? exec_cwd : "(default)", exec_env_count);
 
     /* Create pipes: stdout_pipe for stdout+stderr, stdin_pipe for stdin */
@@ -683,14 +668,12 @@ static void handle_exec(int client_fd, const char *shell_path,
 
     if (pipe(stdout_pipe) < 0) {
         LOGE("Client fd=%d: pipe(stdout) failed: %s\n", client_fd, strerror(errno));
-        free(command);
         proto_send(client_fd, FTYD_CLOSE, NULL, 0);
         close(client_fd);
         return;
     }
     if (pipe(stdin_pipe) < 0) {
         LOGE("Client fd=%d: pipe(stdin) failed: %s\n", client_fd, strerror(errno));
-        free(command);
         close(stdout_pipe[0]); close(stdout_pipe[1]);
         proto_send(client_fd, FTYD_CLOSE, NULL, 0);
         close(client_fd);
@@ -708,7 +691,6 @@ static void handle_exec(int client_fd, const char *shell_path,
     if (pid < 0) {
         LOGE("Client fd=%d: fork() failed: %s\n", client_fd, strerror(errno));
         pthread_sigmask(SIG_SETMASK, &old_set, NULL);
-        free(command);
         close(stdout_pipe[0]); close(stdout_pipe[1]);
         close(stdin_pipe[0]); close(stdin_pipe[1]);
         proto_send(client_fd, FTYD_CLOSE, NULL, 0);
@@ -744,23 +726,10 @@ static void handle_exec(int client_fd, const char *shell_path,
         setenv("HOME", "/data/local/tmp", 0);
 
         /* Apply custom environment variables */
-        if (exec_env) {
-            for (int i = 0; exec_env[i] != NULL; i++) {
-                const char *eq = strchr(exec_env[i], '=');
-                if (eq && eq != exec_env[i]) {
-                    size_t key_len = (size_t)(eq - exec_env[i]);
-                    char key[256];
-                    if (key_len < sizeof(key)) {
-                        memcpy(key, exec_env[i], key_len);
-                        key[key_len] = '\0';
-                        setenv(key, eq + 1, 1);
-                    }
-                }
-            }
-        }
+        apply_env_pairs(exec_env);
 
         /* Use sh -c to support pipes, redirects, etc. */
-        execlp(exec_shell, exec_shell, "-c", command, (char *)NULL);
+        execlp(exec_shell, exec_shell, "-c", command_str, (char *)NULL);
         _exit(127);
     }
 
@@ -770,7 +739,6 @@ static void handle_exec(int client_fd, const char *shell_path,
     int exec_slot = exec_table_register(pid);
     pthread_sigmask(SIG_SETMASK, &old_set, NULL);
 
-    free(command);
     close(stdout_pipe[1]); /* we read from stdout_pipe[0] */
     close(stdin_pipe[0]);  /* we write to stdin_pipe[1] */
 
@@ -823,27 +791,11 @@ static void handle_exec(int client_fd, const char *shell_path,
         /* Wait for reap_children() to store the status.  The child is
          * already dead (pipe EOF), so this returns almost immediately. */
         exec_table_wait(exec_slot, pid, &status);
-        if (WIFEXITED(status)) {
-            exit_code = WEXITSTATUS(status);
-        } else if (WIFSIGNALED(status)) {
-            exit_code = 128 + WTERMSIG(status);
-        } else {
-            exit_code = -1;
-        }
+        exit_code = exit_code_from_status(status);
     } else {
         /* Table full — fallback to direct waitpid (racy but unlikely) */
         int wait_ret = waitpid(pid, &status, 0);
-        if (wait_ret == pid) {
-            if (WIFEXITED(status)) {
-                exit_code = WEXITSTATUS(status);
-            } else if (WIFSIGNALED(status)) {
-                exit_code = 128 + WTERMSIG(status);
-            } else {
-                exit_code = -1;
-            }
-        } else {
-            exit_code = -1;
-        }
+        exit_code = (wait_ret == pid) ? exit_code_from_status(status) : -1;
     }
 
     LOGI("Client fd=%d: EXEC finished (exit_code=%d)\n", client_fd, exit_code);

@@ -32,10 +32,10 @@ class TerminalViewModel : ViewModel() {
     private val _isExecRunning = MutableStateFlow(false)
     val isExecRunning: StateFlow<Boolean> = _isExecRunning.asStateFlow()
 
-    private var session: TerminalSession? = null
+    @Volatile private var session: TerminalSession? = null
     private var readJob: Job? = null
 
-    private var execSession: TerminalSession? = null
+    @Volatile private var execSession: TerminalSession? = null
     private var execJob: Job? = null
 
     fun startTerminal(rows: Int = 24, cols: Int = 80, daemonSocketPath: String? = null, shell: String = "/system/bin/sh") {

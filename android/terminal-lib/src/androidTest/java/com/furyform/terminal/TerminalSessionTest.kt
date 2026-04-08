@@ -30,7 +30,7 @@ class TerminalSessionTest {
         val future = executor.submit(Callable { session.read() })
         return try {
             future.get(timeoutMs, TimeUnit.MILLISECONDS)
-        } catch (_: Exception) {
+        } catch (_: java.util.concurrent.TimeoutException) {
             future.cancel(true)
             null
         }
