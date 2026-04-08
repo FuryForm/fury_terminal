@@ -21,19 +21,7 @@ static int ftyd_connect(const char *socket_path) {
     if (fd < 0) return -1;
 
     struct sockaddr_un addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sun_family = AF_UNIX;
-
-    int abstract_sock = (socket_path[0] == '@');
-    if (abstract_sock) {
-        addr.sun_path[0] = '\0';
-        strncpy(addr.sun_path + 1, socket_path + 1, sizeof(addr.sun_path) - 2);
-    } else {
-        strncpy(addr.sun_path, socket_path, sizeof(addr.sun_path) - 1);
-    }
-
-    socklen_t addrlen = (socklen_t)(offsetof(struct sockaddr_un, sun_path)
-                      + (abstract_sock ? strlen(socket_path) : strlen(socket_path) + 1));
+    socklen_t addrlen = setup_sockaddr_un(&addr, socket_path);
     if (connect(fd, (struct sockaddr *)&addr, addrlen) < 0) {
         close(fd);
         return -1;
@@ -496,7 +484,7 @@ Java_com_furyform_terminal_NativePTY_nativeStartLocalExecSession(
         }
 
         /* Set environment */
-        setenv("PATH", "/product/bin:/sbin:/vendor/bin:/system/sbin:/system/bin:/system/xbin:/system/bin/applets", 1);
+        setenv("PATH", DEFAULT_PATH, 1);
         setenv("HOME", "/data/local/tmp", 0);
 
         /* Apply custom environment variables */
@@ -656,7 +644,12 @@ Java_com_furyform_terminal_NativePTY_nativeGetExitCode(JNIEnv *env, jobject thiz
 
         if (pid > 0) {
             int status;
-            int ret = waitpid(pid, &status, 0); /* blocking — child is done */
+            /* Try non-blocking first — nativeIsAlive may have already reaped */
+            int ret = waitpid(pid, &status, WNOHANG);
+            if (ret == 0) {
+                /* Still running; block for it */
+                ret = waitpid(pid, &status, 0);
+            }
             if (ret == pid) {
                 int exit_code = exit_code_from_status(status);
                 set_exit_code((int)id, exit_code);

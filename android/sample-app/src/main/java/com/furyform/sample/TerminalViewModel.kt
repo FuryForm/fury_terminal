@@ -33,10 +33,10 @@ class TerminalViewModel : ViewModel() {
     val isExecRunning: StateFlow<Boolean> = _isExecRunning.asStateFlow()
 
     @Volatile private var session: TerminalSession? = null
-    private var readJob: Job? = null
+    @Volatile private var readJob: Job? = null
 
     @Volatile private var execSession: TerminalSession? = null
-    private var execJob: Job? = null
+    @Volatile private var execJob: Job? = null
 
     fun startTerminal(rows: Int = 24, cols: Int = 80, daemonSocketPath: String? = null, shell: String = "/system/bin/sh") {
         if (_isRunning.value) return  // prevent double-start

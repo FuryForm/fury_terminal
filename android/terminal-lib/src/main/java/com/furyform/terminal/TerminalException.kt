@@ -43,7 +43,7 @@ class NativeException(
 ) : TerminalException(message)
 
 /**
- * A write or resize operation failed at the native layer.
+ * A write operation failed at the native layer.
  * The [bytesOrCode] is the raw return value: -1 for errors.
  */
 class WriteException(

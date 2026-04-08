@@ -10,11 +10,17 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <stddef.h>
 #include <sys/ioctl.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 #include <signal.h>
 #include <sys/wait.h>
 #include <string.h>
 #include <errno.h>
+
+#define DEFAULT_PATH "/product/bin:/sbin:/vendor/bin:/system/sbin:/system/bin:/system/xbin:/system/bin/applets"
+#define MAX_PAYLOAD_FIELDS 128
 
 /**
  * Open a PTY master/slave pair using posix_openpt.
@@ -24,10 +30,10 @@
  * @param aslave   receives the slave fd
  * @return 0 on success, -1 on failure
  */
-static int my_openpty(int *amaster, int *aslave) {
+static inline int my_openpty(int *amaster, int *aslave) {
     int master = posix_openpt(O_RDWR | O_NOCTTY);
     if (master == -1) return -1;
-    fcntl(master, F_SETFD, FD_CLOEXEC);  /* prevent leaking to children */
+    if (fcntl(master, F_SETFD, FD_CLOEXEC) == -1) { close(master); return -1; }
     if (grantpt(master) == -1)  { close(master); return -1; }
     if (unlockpt(master) == -1) { close(master); return -1; }
     char slave_name[64];
@@ -47,7 +53,7 @@ static int my_openpty(int *amaster, int *aslave) {
  * @param cols  terminal width in columns
  * @return 0 on success, -1 on failure
  */
-static int set_winsize(int fd, int rows, int cols) {
+static inline int set_winsize(int fd, int rows, int cols) {
     struct winsize ws;
     ws.ws_row    = (unsigned short)rows;
     ws.ws_col    = (unsigned short)cols;
@@ -119,6 +125,27 @@ static inline void kill_escalate(pid_t pid, int start_with_hup) {
 }
 
 /**
+ * Set up a sockaddr_un for the given socket path.
+ * Handles abstract sockets (prefix '@') and filesystem sockets.
+ * @param addr   output sockaddr_un (zeroed and filled)
+ * @param path   socket path ('@' prefix for abstract)
+ * @return computed socklen_t for bind/connect
+ */
+static inline socklen_t setup_sockaddr_un(struct sockaddr_un *addr, const char *path) {
+    memset(addr, 0, sizeof(*addr));
+    addr->sun_family = AF_UNIX;
+    int is_abstract = (path[0] == '@');
+    if (is_abstract) {
+        addr->sun_path[0] = '\0';
+        strncpy(addr->sun_path + 1, path + 1, sizeof(addr->sun_path) - 2);
+    } else {
+        strncpy(addr->sun_path, path, sizeof(addr->sun_path) - 1);
+    }
+    return (socklen_t)(offsetof(struct sockaddr_un, sun_path)
+                     + (is_abstract ? strlen(path) : strlen(path) + 1));
+}
+
+/**
  * Fork and exec a shell process connected to the given slave PTY.
  *
  * This is pure C — safe to call from any runtime (Go, Rust, JVM).
@@ -138,7 +165,7 @@ static inline void kill_escalate(pid_t pid, int start_with_hup) {
  * @param cwd        working directory path (may be NULL for default)
  * @return child PID on success, -1 on failure
  */
-static int do_fork_exec(int slave_fd, const char *shell_path,
+static inline int do_fork_exec(int slave_fd, const char *shell_path,
                         const char **env_pairs, const char *cwd) {
     pid_t pid = fork();
     if (pid < 0) return -1;
@@ -161,7 +188,7 @@ static int do_fork_exec(int slave_fd, const char *shell_path,
         /* Set default environment */
         setenv("TERM", "xterm-256color", 1);
         setenv("HOME", "/data/local/tmp", 0);
-        setenv("PATH", "/product/bin:/sbin:/vendor/bin:/system/sbin:/system/bin:/system/xbin:/system/bin/applets", 1);
+        setenv("PATH", DEFAULT_PATH, 1);
         /* Apply custom environment variables (overrides defaults) */
         apply_env_pairs(env_pairs);
         execlp(shell_path, shell_path, (char *)NULL);

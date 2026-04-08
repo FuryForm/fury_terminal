@@ -8,7 +8,9 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.time.Duration.Companion.seconds
+import org.junit.After
 import org.junit.Assert.*
+import org.junit.Assume
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.Timeout
@@ -34,6 +36,11 @@ class TerminalSessionTest {
             future.cancel(true)
             null
         }
+    }
+
+    @After
+    fun shutdownExecutor() {
+        executor.shutdownNow()
     }
 
     // =================== Local Session: Creation ===================
@@ -243,13 +250,12 @@ class TerminalSessionTest {
 
     @Test
     fun usePattern_closesSessionAutomatically() {
-        val closed: Boolean
-        TerminalSession.create().use { session ->
-            assertFalse(session.isClosed)
-            session.write("echo USE_TEST\n")
-            closed = session.isClosed
+        var session: TerminalSession?
+        TerminalSession.create().also { session = it }.use { s ->
+            assertFalse("Should not be closed inside use{}", s.isClosed)
+            s.write("echo USE_TEST\n")
         }
-        assertFalse("Should not be closed inside use{}", closed)
+        assertTrue("Should be closed after use{}", session!!.isClosed)
     }
 
     // =================== End-to-End ===================
@@ -307,7 +313,8 @@ class TerminalSessionTest {
         val session = try {
             TerminalSession.createDaemon(socketPath = "@ftyd")
         } catch (_: DaemonConnectionException) {
-            return // Daemon not running
+            Assume.assumeTrue("Daemon not running", false)
+            return // unreachable, satisfies compiler
         }
 
         session.write("echo DAEMON_TEST\n")
@@ -328,7 +335,8 @@ class TerminalSessionTest {
         val session = try {
             TerminalSession.createDaemon(socketPath = "@ftyd")
         } catch (_: DaemonConnectionException) {
-            return
+            Assume.assumeTrue("Daemon not running", false)
+            return // unreachable, satisfies compiler
         }
 
         val result = session.resize(50, 132)
@@ -341,7 +349,8 @@ class TerminalSessionTest {
         val session = try {
             TerminalSession.createDaemon(socketPath = "@ftyd")
         } catch (_: DaemonConnectionException) {
-            return
+            Assume.assumeTrue("Daemon not running", false)
+            return // unreachable, satisfies compiler
         }
 
         session.write("sleep 60\n")
@@ -360,7 +369,8 @@ class TerminalSessionTest {
         val session = try {
             TerminalSession.createDaemon(socketPath = "@ftyd")
         } catch (_: DaemonConnectionException) {
-            return
+            Assume.assumeTrue("Daemon not running", false)
+            return // unreachable, satisfies compiler
         }
 
         session.write("id\n")
@@ -385,7 +395,8 @@ class TerminalSessionTest {
         val session = try {
             TerminalSession.createDaemon(socketPath = "@ftyd")
         } catch (_: DaemonConnectionException) {
-            return@runBlocking
+            Assume.assumeTrue("Daemon not running", false)
+            return@runBlocking // unreachable, satisfies compiler
         }
 
         session.write("echo DAEMON_FLOW_TEST\n")
@@ -413,7 +424,8 @@ class TerminalSessionTest {
         val session = try {
             TerminalSession.createDaemon(socketPath = "@ftyd")
         } catch (_: DaemonConnectionException) {
-            return
+            Assume.assumeTrue("Daemon not running", false)
+            return // unreachable, satisfies compiler
         }
 
         session.close()
@@ -429,7 +441,8 @@ class TerminalSessionTest {
         val result = try {
             TerminalSession.exec("echo hello", "@ftyd")
         } catch (_: DaemonConnectionException) {
-            return // Daemon not running
+            Assume.assumeTrue("Daemon not running", false)
+            return // unreachable, satisfies compiler
         }
 
         assertTrue(
@@ -445,7 +458,8 @@ class TerminalSessionTest {
         val result = try {
             TerminalSession.exec("exit 42", "@ftyd")
         } catch (_: DaemonConnectionException) {
-            return // Daemon not running
+            Assume.assumeTrue("Daemon not running", false)
+            return // unreachable, satisfies compiler
         }
 
         assertEquals("Exit code should be 42", 42, result.exitCode)
@@ -457,7 +471,8 @@ class TerminalSessionTest {
         val result = try {
             TerminalSession.exec("nonexistent_command_xyz", "@ftyd")
         } catch (_: DaemonConnectionException) {
-            return // Daemon not running
+            Assume.assumeTrue("Daemon not running", false)
+            return // unreachable, satisfies compiler
         }
 
         assertEquals("Exit code should be 127 for command not found", 127, result.exitCode)
@@ -468,7 +483,8 @@ class TerminalSessionTest {
         val result = try {
             TerminalSession.exec("echo line1; echo line2; echo line3", "@ftyd")
         } catch (_: DaemonConnectionException) {
-            return // Daemon not running
+            Assume.assumeTrue("Daemon not running", false)
+            return // unreachable, satisfies compiler
         }
 
         assertTrue(
@@ -490,7 +506,8 @@ class TerminalSessionTest {
         val result = try {
             TerminalSession.exec("echo test123", "@ftyd")
         } catch (_: DaemonConnectionException) {
-            return // Daemon not running
+            Assume.assumeTrue("Daemon not running", false)
+            return // unreachable, satisfies compiler
         }
 
         assertTrue(
@@ -508,7 +525,8 @@ class TerminalSessionTest {
         val session = try {
             TerminalSession.execSession("echo a; echo b; echo c", "@ftyd")
         } catch (_: DaemonConnectionException) {
-            return // Daemon not running
+            Assume.assumeTrue("Daemon not running", false)
+            return // unreachable, satisfies compiler
         }
 
         session.use {
@@ -540,7 +558,8 @@ class TerminalSessionTest {
         val result = try {
             TerminalSession.exec("seq 1 1000", "@ftyd")
         } catch (_: DaemonConnectionException) {
-            return // Daemon not running
+            Assume.assumeTrue("Daemon not running", false)
+            return // unreachable, satisfies compiler
         }
 
         assertTrue(
@@ -559,7 +578,8 @@ class TerminalSessionTest {
         val result = try {
             TerminalSession.exec("echo err >&2", "@ftyd")
         } catch (_: DaemonConnectionException) {
-            return // Daemon not running
+            Assume.assumeTrue("Daemon not running", false)
+            return // unreachable, satisfies compiler
         }
 
         assertTrue(
@@ -573,7 +593,8 @@ class TerminalSessionTest {
         val result = try {
             TerminalSession.exec("echo hello world | tr ' ' '\n'", "@ftyd")
         } catch (_: DaemonConnectionException) {
-            return // Daemon not running
+            Assume.assumeTrue("Daemon not running", false)
+            return // unreachable, satisfies compiler
         }
 
         assertTrue(
@@ -789,15 +810,13 @@ class TerminalSessionTest {
     @Test
     fun testExecLocalSessionSendSignalInterrupt() {
         val session = TerminalSession.execSession("sleep 60")
-        session.sendSignal(2) // SIGINT
-        Thread.sleep(500)
-        val alive = session.isAlive
-        val chunk = readWithTimeout(session, 500)
-        assertFalse(
-            "Process should not be alive after SIGINT (isAlive=$alive, read=${chunk != null})",
-            alive && chunk != null
-        )
-        session.close()
+        try {
+            session.sendSignal(2) // SIGINT
+            Thread.sleep(500)
+            assertFalse("Process should not be alive after SIGINT", session.isAlive)
+        } finally {
+            session.close()
+        }
     }
 
     @Test
@@ -903,7 +922,8 @@ class TerminalSessionTest {
         val result = try {
             TerminalSession.exec("id", socketPath = "@ftyd")
         } catch (_: DaemonConnectionException) {
-            return // Daemon not running — skip
+            Assume.assumeTrue("Daemon not running", false)
+            return // unreachable, satisfies compiler
         }
         assertTrue(
             "Daemon exec (socketPath='@ftyd') should run as uid=0, got: ${result.output.take(200)}",
@@ -1070,7 +1090,8 @@ class TerminalSessionTest {
                 env = mapOf("FURY_DAEMON_TEST" to "daemon_env_val")
             )
         } catch (_: DaemonConnectionException) {
-            return // Daemon not running
+            Assume.assumeTrue("Daemon not running", false)
+            return // unreachable, satisfies compiler
         }
 
         session.use {
@@ -1094,7 +1115,8 @@ class TerminalSessionTest {
         val session = try {
             TerminalSession.createDaemon(socketPath = "@ftyd", cwd = "/data/local/tmp")
         } catch (_: DaemonConnectionException) {
-            return
+            Assume.assumeTrue("Daemon not running", false)
+            return // unreachable, satisfies compiler
         }
 
         session.use {
@@ -1122,7 +1144,8 @@ class TerminalSessionTest {
                 cwd = "/data/local/tmp"
             )
         } catch (_: DaemonConnectionException) {
-            return
+            Assume.assumeTrue("Daemon not running", false)
+            return // unreachable, satisfies compiler
         }
 
         session.use {
@@ -1154,7 +1177,8 @@ class TerminalSessionTest {
                 env = mapOf("DAEMON_EXEC_VAR" to "daemon_exec_env_123")
             )
         } catch (_: DaemonConnectionException) {
-            return
+            Assume.assumeTrue("Daemon not running", false)
+            return // unreachable, satisfies compiler
         }
         assertTrue(
             "Daemon exec should have env var, got: ${result.output.take(200)}",
@@ -1167,7 +1191,8 @@ class TerminalSessionTest {
         val result = try {
             TerminalSession.exec("pwd", socketPath = "@ftyd", cwd = "/data/local/tmp")
         } catch (_: DaemonConnectionException) {
-            return
+            Assume.assumeTrue("Daemon not running", false)
+            return // unreachable, satisfies compiler
         }
         assertTrue(
             "Daemon exec cwd should be /data/local/tmp, got: ${result.output.take(200)}",
@@ -1185,7 +1210,8 @@ class TerminalSessionTest {
                 cwd = "/data/local/tmp"
             )
         } catch (_: DaemonConnectionException) {
-            return
+            Assume.assumeTrue("Daemon not running", false)
+            return // unreachable, satisfies compiler
         }
         assertTrue(result.output.contains("daemon_dual_val"))
         assertTrue(result.output.contains("/data/local/tmp"))
@@ -1201,7 +1227,8 @@ class TerminalSessionTest {
                 cwd = "/data/local/tmp"
             )
         } catch (_: DaemonConnectionException) {
-            return
+            Assume.assumeTrue("Daemon not running", false)
+            return // unreachable, satisfies compiler
         }
 
         session.use {
@@ -1227,7 +1254,8 @@ class TerminalSessionTest {
                 cwd = "/data/local/tmp"
             )
         } catch (_: DaemonConnectionException) {
-            return@runBlocking
+            Assume.assumeTrue("Daemon not running", false)
+            return@runBlocking // unreachable, satisfies compiler
         }
         assertTrue(result.output.contains("async_daemon_val"))
         assertTrue(result.output.contains("/data/local/tmp"))
@@ -1242,7 +1270,8 @@ class TerminalSessionTest {
                 env = mapOf("DAEMON_A" to "alpha", "DAEMON_B" to "beta", "DAEMON_C" to "gamma")
             )
         } catch (_: DaemonConnectionException) {
-            return
+            Assume.assumeTrue("Daemon not running", false)
+            return // unreachable, satisfies compiler
         }
         assertTrue(result.output.contains("alpha"))
         assertTrue(result.output.contains("beta"))

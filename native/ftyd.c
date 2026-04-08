@@ -269,9 +269,13 @@ static int exec_table_wait(int slot, pid_t pid, int *status) {
                 return 0;
             }
             LOGE("exec_table_wait: timeout waiting for PID %d, falling back to waitpid\n", pid);
+            /* Try direct waitpid BEFORE freeing slot — if we free first,
+             * the handler could reuse this slot for another child. */
+            if (waitpid(pid, status, WNOHANG) == pid) {
+                __atomic_store_n(&exec_table.entries[slot].pid, 0, __ATOMIC_RELEASE);
+                return 0;
+            }
             __atomic_store_n(&exec_table.entries[slot].pid, 0, __ATOMIC_RELEASE);
-            /* Try direct waitpid as fallback */
-            if (waitpid(pid, status, 0) == pid) return 0;
             *status = 0;
             return -1;
         }
@@ -375,11 +379,11 @@ static void handle_client(int client_fd, const char *shell_path) {
         extended_buf[ext_len] = '\0';
 
         /* Split into NUL-separated fields */
-        const char *fields[128];
+        const char *fields[MAX_PAYLOAD_FIELDS];
         int field_count = 0;
         const char *p = extended_buf;
         const char *end = extended_buf + ext_len;
-        while (p < end && field_count < 128) {
+        while (p < end && field_count < MAX_PAYLOAD_FIELDS) {
             fields[field_count++] = p;
             p += strlen(p) + 1;
         }
@@ -577,11 +581,7 @@ static void *exec_client_reader_thread(void *arg) {
         case FTYD_CLOSE:
             LOGD("EXEC client fd=%d: CLOSE received, killing child %d\n",
                  ctx->client_fd, ctx->child_pid);
-            if (kill(-ctx->child_pid, SIGTERM) != 0 && errno == ESRCH)
-                kill(ctx->child_pid, SIGTERM);
-            usleep(50000);
-            if (kill(-ctx->child_pid, SIGKILL) != 0 && errno == ESRCH)
-                kill(ctx->child_pid, SIGKILL);
+            kill_escalate(ctx->child_pid, 0); /* exec: start with SIGTERM */
             goto done;
 
         default:
@@ -619,12 +619,12 @@ static void handle_exec(int client_fd, const char *shell_path,
     memcpy(local_buf, cmd_buf, cmd_len);
     local_buf[cmd_len] = '\0';
 
-    const char *fields[128];
+    const char *fields[MAX_PAYLOAD_FIELDS];
     int field_count = 0;
     {
         const uint8_t *p = local_buf;
         const uint8_t *end = local_buf + cmd_len;
-        while (p < end && field_count < 128) {
+        while (p < end && field_count < MAX_PAYLOAD_FIELDS) {
             fields[field_count++] = (const char *)p;
             p += strlen((const char *)p) + 1;
         }
@@ -722,7 +722,7 @@ static void handle_exec(int client_fd, const char *shell_path,
         }
 
         /* Set default environment */
-        setenv("PATH", "/product/bin:/sbin:/vendor/bin:/system/sbin:/system/bin:/system/xbin:/system/bin/applets", 1);
+        setenv("PATH", DEFAULT_PATH, 1);
         setenv("HOME", "/data/local/tmp", 0);
 
         /* Apply custom environment variables */
@@ -763,11 +763,7 @@ static void handle_exec(int client_fd, const char *shell_path,
     while ((n = read(stdout_pipe[0], buf, sizeof(buf))) > 0) {
         if (proto_send(client_fd, FTYD_DATA, buf, (uint32_t)n) < 0) {
             /* Client disconnected — kill the child process group to avoid leaking processes */
-            if (kill(-pid, SIGTERM) != 0 && errno == ESRCH)
-                kill(pid, SIGTERM);
-            usleep(50000);
-            if (kill(-pid, SIGKILL) != 0 && errno == ESRCH)
-                kill(pid, SIGKILL);
+            kill_escalate(pid, 0); /* exec: start with SIGTERM */
             break;
         }
     }
@@ -888,23 +884,13 @@ static int create_listen_socket(const char *socket_path) {
         return -1;
     }
 
-    struct sockaddr_un addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sun_family = AF_UNIX;
-
     int is_abstract = (socket_path[0] == '@');
-
-    if (is_abstract) {
-        addr.sun_path[0] = '\0';
-        strncpy(addr.sun_path + 1, socket_path + 1, sizeof(addr.sun_path) - 2);
-    } else {
-        /* Remove existing socket file */
+    if (!is_abstract) {
         unlink(socket_path);
-        strncpy(addr.sun_path, socket_path, sizeof(addr.sun_path) - 1);
     }
 
-    socklen_t addrlen = (socklen_t)(offsetof(struct sockaddr_un, sun_path)
-                      + (is_abstract ? strlen(socket_path) : strlen(socket_path) + 1));
+    struct sockaddr_un addr;
+    socklen_t addrlen = setup_sockaddr_un(&addr, socket_path);
 
     if (bind(fd, (struct sockaddr *)&addr, addrlen) < 0) {
         LOGE("bind(%s) failed: %s\n", socket_path, strerror(errno));
@@ -913,7 +899,6 @@ static int create_listen_socket(const char *socket_path) {
     }
 
     if (!is_abstract) {
-        /* Allow any app to connect (the socket runs as root) */
         chmod(socket_path, 0666);
     }
 

@@ -1,7 +1,9 @@
 package com.furyform.terminal
 
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import org.junit.After
 import org.junit.Assert.*
+import org.junit.Assume
 import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
@@ -35,6 +37,11 @@ class NativePTYTest {
         NativePTY.ensureLoaded()
     }
 
+    @After
+    fun shutdownExecutor() {
+        executor.shutdownNow()
+    }
+
     // =================== Library Loading ===================
 
     @Test
@@ -54,30 +61,42 @@ class NativePTYTest {
     @Test
     fun startPTY_returnsValidId() {
         val id = NativePTY.nativeStartPTY(24, 80, "/system/bin/sh", null, null)
-        assertTrue("Session ID should be >= 0, got $id", id >= 0)
-        NativePTY.nativeClose(id)
+        try {
+            assertTrue("Session ID should be >= 0, got $id", id >= 0)
+        } finally {
+            NativePTY.nativeClose(id)
+        }
     }
 
     @Test
     fun startPTY_differentIdsForDifferentSessions() {
         val id1 = NativePTY.nativeStartPTY(24, 80, "/system/bin/sh", null, null)
         val id2 = NativePTY.nativeStartPTY(24, 80, "/system/bin/sh", null, null)
-        assertTrue(id1 >= 0)
-        assertTrue(id2 >= 0)
-        assertNotEquals("Different sessions should have different IDs", id1, id2)
-        NativePTY.nativeClose(id1)
-        NativePTY.nativeClose(id2)
+        try {
+            assertTrue(id1 >= 0)
+            assertTrue(id2 >= 0)
+            assertNotEquals("Different sessions should have different IDs", id1, id2)
+        } finally {
+            NativePTY.nativeClose(id1)
+            NativePTY.nativeClose(id2)
+        }
     }
 
     @Test
     fun startPTY_variousTerminalSizes() {
         val id1 = NativePTY.nativeStartPTY(1, 1, "/system/bin/sh", null, null)
-        assertTrue(id1 >= 0)
-        NativePTY.nativeClose(id1)
+        try {
+            assertTrue(id1 >= 0)
+        } finally {
+            NativePTY.nativeClose(id1)
+        }
 
         val id2 = NativePTY.nativeStartPTY(200, 400, "/system/bin/sh", null, null)
-        assertTrue(id2 >= 0)
-        NativePTY.nativeClose(id2)
+        try {
+            assertTrue(id2 >= 0)
+        } finally {
+            NativePTY.nativeClose(id2)
+        }
     }
 
     // =================== nativeRead ===================
@@ -85,12 +104,15 @@ class NativePTYTest {
     @Test
     fun read_returnsDataFromShell() {
         val id = NativePTY.nativeStartPTY(24, 80, "/system/bin/sh", null, null)
-        NativePTY.nativeWrite(id, "echo FURY_TEST_OUTPUT\n".toByteArray())
-        Thread.sleep(500)
-        val data = readWithTimeout(id)
-        assertNotNull("Should read data from PTY", data)
-        assertTrue("Read data should not be empty", data!!.isNotEmpty())
-        NativePTY.nativeClose(id)
+        try {
+            NativePTY.nativeWrite(id, "echo FURY_TEST_OUTPUT\n".toByteArray())
+            Thread.sleep(500)
+            val data = readWithTimeout(id)
+            assertNotNull("Should read data from PTY", data)
+            assertTrue("Read data should not be empty", data!!.isNotEmpty())
+        } finally {
+            NativePTY.nativeClose(id)
+        }
     }
 
     @Test
@@ -105,27 +127,36 @@ class NativePTYTest {
     @Test
     fun write_returnsPositiveByteCount() {
         val id = NativePTY.nativeStartPTY(24, 80, "/system/bin/sh", null, null)
-        val input = "echo hello\n".toByteArray()
-        val written = NativePTY.nativeWrite(id, input)
-        assertEquals("Should write all bytes", input.size, written)
-        NativePTY.nativeClose(id)
+        try {
+            val input = "echo hello\n".toByteArray()
+            val written = NativePTY.nativeWrite(id, input)
+            assertEquals("Should write all bytes", input.size, written)
+        } finally {
+            NativePTY.nativeClose(id)
+        }
     }
 
     @Test
     fun write_binarySafe_nullBytes() {
         val id = NativePTY.nativeStartPTY(24, 80, "/system/bin/sh", null, null)
-        val binaryData = byteArrayOf(0x41, 0x00, 0x42, 0x00, 0x43)
-        val written = NativePTY.nativeWrite(id, binaryData)
-        assertEquals("Should write all 5 bytes including nulls", 5, written)
-        NativePTY.nativeClose(id)
+        try {
+            val binaryData = byteArrayOf(0x41, 0x00, 0x42, 0x00, 0x43)
+            val written = NativePTY.nativeWrite(id, binaryData)
+            assertEquals("Should write all 5 bytes including nulls", 5, written)
+        } finally {
+            NativePTY.nativeClose(id)
+        }
     }
 
     @Test
     fun write_emptyData_returnsZero() {
         val id = NativePTY.nativeStartPTY(24, 80, "/system/bin/sh", null, null)
-        val written = NativePTY.nativeWrite(id, byteArrayOf())
-        assertTrue("Empty write should return 0, got $written", written == 0)
-        NativePTY.nativeClose(id)
+        try {
+            val written = NativePTY.nativeWrite(id, byteArrayOf())
+            assertTrue("Empty write should return 0, got $written", written == 0)
+        } finally {
+            NativePTY.nativeClose(id)
+        }
     }
 
     @Test
@@ -137,10 +168,13 @@ class NativePTYTest {
     @Test
     fun write_largeData() {
         val id = NativePTY.nativeStartPTY(24, 80, "/system/bin/sh", null, null)
-        val largeData = ByteArray(16384) { (it % 256).toByte() }
-        val written = NativePTY.nativeWrite(id, largeData)
-        assertTrue("Large write should succeed, got $written", written > 0)
-        NativePTY.nativeClose(id)
+        try {
+            val largeData = ByteArray(16384) { (it % 256).toByte() }
+            val written = NativePTY.nativeWrite(id, largeData)
+            assertTrue("Large write should succeed, got $written", written > 0)
+        } finally {
+            NativePTY.nativeClose(id)
+        }
     }
 
     // =================== nativeResize ===================
@@ -148,9 +182,12 @@ class NativePTYTest {
     @Test
     fun resize_succeeds() {
         val id = NativePTY.nativeStartPTY(24, 80, "/system/bin/sh", null, null)
-        val result = NativePTY.nativeResize(id, 40, 120)
-        assertEquals("Resize should return 0 on success", 0, result)
-        NativePTY.nativeClose(id)
+        try {
+            val result = NativePTY.nativeResize(id, 40, 120)
+            assertEquals("Resize should return 0 on success", 0, result)
+        } finally {
+            NativePTY.nativeClose(id)
+        }
     }
 
     @Test
@@ -162,10 +199,13 @@ class NativePTYTest {
     @Test
     fun resize_variousSizes() {
         val id = NativePTY.nativeStartPTY(24, 80, "/system/bin/sh", null, null)
-        assertEquals(0, NativePTY.nativeResize(id, 1, 1))
-        assertEquals(0, NativePTY.nativeResize(id, 200, 400))
-        assertEquals(0, NativePTY.nativeResize(id, 50, 50))
-        NativePTY.nativeClose(id)
+        try {
+            assertEquals(0, NativePTY.nativeResize(id, 1, 1))
+            assertEquals(0, NativePTY.nativeResize(id, 200, 400))
+            assertEquals(0, NativePTY.nativeResize(id, 50, 50))
+        } finally {
+            NativePTY.nativeClose(id)
+        }
     }
 
     // =================== nativeClose ===================
@@ -194,20 +234,26 @@ class NativePTYTest {
     @Test
     fun isAlive_trueForRunningSession() {
         val id = NativePTY.nativeStartPTY(24, 80, "/system/bin/sh", null, null)
-        assertTrue("Session should be alive immediately after start", NativePTY.nativeIsAlive(id))
-        NativePTY.nativeClose(id)
+        try {
+            assertTrue("Session should be alive immediately after start", NativePTY.nativeIsAlive(id))
+        } finally {
+            NativePTY.nativeClose(id)
+        }
     }
 
     @Test
     fun isAlive_falseAfterExit() {
         val id = NativePTY.nativeStartPTY(24, 80, "/system/bin/sh", null, null)
-        NativePTY.nativeWrite(id, "exit\n".toByteArray())
-        Thread.sleep(1000)
-        // Drain output with timeout (don't block forever)
-        readWithTimeout(id, 2000)
-        Thread.sleep(200)
-        assertFalse("Session should not be alive after shell exits", NativePTY.nativeIsAlive(id))
-        NativePTY.nativeClose(id)
+        try {
+            NativePTY.nativeWrite(id, "exit\n".toByteArray())
+            Thread.sleep(1000)
+            // Drain output with timeout (don't block forever)
+            readWithTimeout(id, 2000)
+            Thread.sleep(200)
+            assertFalse("Session should not be alive after shell exits", NativePTY.nativeIsAlive(id))
+        } finally {
+            NativePTY.nativeClose(id)
+        }
     }
 
     @Test
@@ -221,20 +267,26 @@ class NativePTYTest {
     @Test
     fun sendSignal_doesNotCrash() {
         val id = NativePTY.nativeStartPTY(24, 80, "/system/bin/sh", null, null)
-        NativePTY.nativeSendSignal(id, 28) // SIGWINCH — harmless
-        assertTrue("Session should still be alive after SIGWINCH", NativePTY.nativeIsAlive(id))
-        NativePTY.nativeClose(id)
+        try {
+            NativePTY.nativeSendSignal(id, 28) // SIGWINCH — harmless
+            assertTrue("Session should still be alive after SIGWINCH", NativePTY.nativeIsAlive(id))
+        } finally {
+            NativePTY.nativeClose(id)
+        }
     }
 
     @Test
     fun sendSignal_sigintKillsForegroundProcess() {
         val id = NativePTY.nativeStartPTY(24, 80, "/system/bin/sh", null, null)
-        NativePTY.nativeWrite(id, "sleep 60\n".toByteArray())
-        Thread.sleep(500)
-        NativePTY.nativeSendSignal(id, 2) // SIGINT
-        Thread.sleep(500)
-        assertTrue("Shell should survive SIGINT to foreground process", NativePTY.nativeIsAlive(id))
-        NativePTY.nativeClose(id)
+        try {
+            NativePTY.nativeWrite(id, "sleep 60\n".toByteArray())
+            Thread.sleep(500)
+            NativePTY.nativeSendSignal(id, 2) // SIGINT
+            Thread.sleep(500)
+            assertTrue("Shell should survive SIGINT to foreground process", NativePTY.nativeIsAlive(id))
+        } finally {
+            NativePTY.nativeClose(id)
+        }
     }
 
     @Test
@@ -248,41 +300,46 @@ class NativePTYTest {
     @Test
     fun endToEnd_echoCommand() {
         val id = NativePTY.nativeStartPTY(24, 80, "/system/bin/sh", null, null)
-        NativePTY.nativeWrite(id, "echo FURY_E2E_TEST\n".toByteArray())
-        Thread.sleep(1000) // let shell process
+        try {
+            NativePTY.nativeWrite(id, "echo FURY_E2E_TEST\n".toByteArray())
+            Thread.sleep(1000) // let shell process
 
-        // Accumulate output with timeout-protected reads
-        val output = StringBuilder()
-        for (i in 0 until 5) {
-            val data = readWithTimeout(id, 1000) ?: break
-            output.append(String(data))
-            if (output.contains("FURY_E2E_TEST")) break
+            // Accumulate output with timeout-protected reads
+            val output = StringBuilder()
+            for (i in 0 until 5) {
+                val data = readWithTimeout(id, 1000) ?: break
+                output.append(String(data))
+                if (output.contains("FURY_E2E_TEST")) break
+            }
+
+            assertTrue(
+                "Output should contain 'FURY_E2E_TEST', got: ${output.take(200)}",
+                output.contains("FURY_E2E_TEST")
+            )
+        } finally {
+            NativePTY.nativeClose(id)
         }
-
-        assertTrue(
-            "Output should contain 'FURY_E2E_TEST', got: ${output.take(200)}",
-            output.contains("FURY_E2E_TEST")
-        )
-        NativePTY.nativeClose(id)
     }
 
     @Test
     fun endToEnd_multipleSessionsConcurrently() {
         val ids = (0 until 4).map { NativePTY.nativeStartPTY(24, 80, "/system/bin/sh", null, null) }
-        ids.forEach { assertTrue("All sessions should start, got $it", it >= 0) }
-        ids.forEach { assertTrue(NativePTY.nativeIsAlive(it)) }
+        try {
+            ids.forEach { assertTrue("All sessions should start, got $it", it >= 0) }
+            ids.forEach { assertTrue(NativePTY.nativeIsAlive(it)) }
 
-        ids.forEachIndexed { i, id ->
-            NativePTY.nativeWrite(id, "echo SESSION_$i\n".toByteArray())
+            ids.forEachIndexed { i, id ->
+                NativePTY.nativeWrite(id, "echo SESSION_$i\n".toByteArray())
+            }
+            Thread.sleep(500)
+
+            ids.forEachIndexed { i, id ->
+                val data = readWithTimeout(id, 2000)
+                assertNotNull("Session $i should produce output", data)
+            }
+        } finally {
+            ids.forEach { NativePTY.nativeClose(it) }
         }
-        Thread.sleep(500)
-
-        ids.forEachIndexed { i, id ->
-            val data = readWithTimeout(id, 2000)
-            assertNotNull("Session $i should produce output", data)
-        }
-
-        ids.forEach { NativePTY.nativeClose(it) }
     }
 
     @Test
@@ -292,15 +349,17 @@ class NativePTYTest {
         Thread.sleep(200)
 
         val id2 = NativePTY.nativeStartPTY(24, 80, "/system/bin/sh", null, null)
-        assertTrue(id2 >= 0)
-        assertTrue(NativePTY.nativeIsAlive(id2))
+        try {
+            assertTrue(id2 >= 0)
+            assertTrue(NativePTY.nativeIsAlive(id2))
 
-        NativePTY.nativeWrite(id2, "echo REUSE_TEST\n".toByteArray())
-        Thread.sleep(500)
-        val data = readWithTimeout(id2, 2000)
-        assertNotNull(data)
-
-        NativePTY.nativeClose(id2)
+            NativePTY.nativeWrite(id2, "echo REUSE_TEST\n".toByteArray())
+            Thread.sleep(500)
+            val data = readWithTimeout(id2, 2000)
+            assertNotNull(data)
+        } finally {
+            NativePTY.nativeClose(id2)
+        }
     }
 
     // =================== nativeStartLocalExecSession ===================
@@ -308,56 +367,71 @@ class NativePTYTest {
     @Test
     fun startLocalExec_returnsValidId() {
         val id = NativePTY.nativeStartLocalExecSession("/system/bin/sh", "echo test", null, null)
-        assertTrue("Session ID should be >= 0, got $id", id >= 0)
-        NativePTY.nativeClose(id)
+        try {
+            assertTrue("Session ID should be >= 0, got $id", id >= 0)
+        } finally {
+            NativePTY.nativeClose(id)
+        }
     }
 
     @Test
     fun startLocalExec_readsOutput() {
         val id = NativePTY.nativeStartLocalExecSession("/system/bin/sh", "echo native_exec_test", null, null)
-        assertTrue(id >= 0)
-        val output = StringBuilder()
-        for (i in 0 until 5) {
-            val data = readWithTimeout(id, 2000) ?: break
-            output.append(String(data))
-            if (output.contains("native_exec_test")) break
+        try {
+            assertTrue(id >= 0)
+            val output = StringBuilder()
+            for (i in 0 until 5) {
+                val data = readWithTimeout(id, 2000) ?: break
+                output.append(String(data))
+                if (output.contains("native_exec_test")) break
+            }
+            assertTrue(
+                "Output should contain 'native_exec_test', got: ${output.take(200)}",
+                output.contains("native_exec_test")
+            )
+        } finally {
+            NativePTY.nativeClose(id)
         }
-        assertTrue(
-            "Output should contain 'native_exec_test', got: ${output.take(200)}",
-            output.contains("native_exec_test")
-        )
-        NativePTY.nativeClose(id)
     }
 
     @Test
     fun startLocalExec_readsEOF() {
         val id = NativePTY.nativeStartLocalExecSession("/system/bin/sh", "echo done", null, null)
-        assertTrue(id >= 0)
-        var gotData = false
-        while (true) {
-            val data = readWithTimeout(id, 2000) ?: break
-            if (data.isNotEmpty()) gotData = true
+        try {
+            assertTrue(id >= 0)
+            var gotData = false
+            while (true) {
+                val data = readWithTimeout(id, 2000) ?: break
+                if (data.isNotEmpty()) gotData = true
+            }
+            assertTrue("Should have received data before EOF", gotData)
+        } finally {
+            NativePTY.nativeClose(id)
         }
-        assertTrue("Should have received data before EOF", gotData)
-        NativePTY.nativeClose(id)
     }
 
     @Test
     fun startLocalExec_invalidShell_returnsValidId() {
         // fork succeeds but execl fails; child exits 127. ID should be >= 0.
         val id = NativePTY.nativeStartLocalExecSession("/nonexistent/shell", "echo hi", null, null)
-        assertTrue("Fork should succeed even with invalid shell, got $id", id >= 0)
-        // Output may be empty — drain without asserting content
-        while (readWithTimeout(id, 2000) != null) { /* drain */ }
-        NativePTY.nativeClose(id)
+        try {
+            assertTrue("Fork should succeed even with invalid shell, got $id", id >= 0)
+            // Output may be empty — drain without asserting content
+            while (readWithTimeout(id, 2000) != null) { /* drain */ }
+        } finally {
+            NativePTY.nativeClose(id)
+        }
     }
 
     @Test
     fun startLocalExec_emptyCommand() {
         // Empty command should not crash; shell launched with empty command string
         val id = NativePTY.nativeStartLocalExecSession("/system/bin/sh", "", null, null)
-        assertTrue("Should not crash on empty command, got $id", id >= 0)
-        NativePTY.nativeClose(id)
+        try {
+            assertTrue("Should not crash on empty command, got $id", id >= 0)
+        } finally {
+            NativePTY.nativeClose(id)
+        }
     }
 
     // =================== nativeGetExitCode ===================
@@ -365,31 +439,40 @@ class NativePTYTest {
     @Test
     fun getExitCode_localExec_success() {
         val id = NativePTY.nativeStartLocalExecSession("/system/bin/sh", "echo hi", null, null)
-        assertTrue(id >= 0)
-        while (readWithTimeout(id, 2000) != null) { /* drain until EOF */ }
-        val exitCode = NativePTY.nativeGetExitCode(id)
-        assertEquals("Exit code should be 0 for successful command", 0, exitCode)
-        NativePTY.nativeClose(id)
+        try {
+            assertTrue(id >= 0)
+            while (readWithTimeout(id, 2000) != null) { /* drain until EOF */ }
+            val exitCode = NativePTY.nativeGetExitCode(id)
+            assertEquals("Exit code should be 0 for successful command", 0, exitCode)
+        } finally {
+            NativePTY.nativeClose(id)
+        }
     }
 
     @Test
     fun getExitCode_localExec_nonZero() {
         val id = NativePTY.nativeStartLocalExecSession("/system/bin/sh", "exit 42", null, null)
-        assertTrue(id >= 0)
-        while (readWithTimeout(id, 2000) != null) { /* drain until EOF */ }
-        val exitCode = NativePTY.nativeGetExitCode(id)
-        assertEquals("Exit code should be 42", 42, exitCode)
-        NativePTY.nativeClose(id)
+        try {
+            assertTrue(id >= 0)
+            while (readWithTimeout(id, 2000) != null) { /* drain until EOF */ }
+            val exitCode = NativePTY.nativeGetExitCode(id)
+            assertEquals("Exit code should be 42", 42, exitCode)
+        } finally {
+            NativePTY.nativeClose(id)
+        }
     }
 
     @Test
     fun getExitCode_localExec_commandNotFound() {
         val id = NativePTY.nativeStartLocalExecSession("/system/bin/sh", "nonexistent_cmd_xyz", null, null)
-        assertTrue(id >= 0)
-        while (readWithTimeout(id, 2000) != null) { /* drain until EOF */ }
-        val exitCode = NativePTY.nativeGetExitCode(id)
-        assertEquals("Exit code should be 127 for command not found", 127, exitCode)
-        NativePTY.nativeClose(id)
+        try {
+            assertTrue(id >= 0)
+            while (readWithTimeout(id, 2000) != null) { /* drain until EOF */ }
+            val exitCode = NativePTY.nativeGetExitCode(id)
+            assertEquals("Exit code should be 127 for command not found", 127, exitCode)
+        } finally {
+            NativePTY.nativeClose(id)
+        }
     }
 
     @Test
@@ -397,10 +480,13 @@ class NativePTYTest {
         // nativeGetExitCode uses blocking waitpid for local exec sessions,
         // so it will wait for the process to exit and return the real code
         val id = NativePTY.nativeStartLocalExecSession("/system/bin/sh", "exit 42", null, null)
-        assertTrue(id >= 0)
-        val exitCode = NativePTY.nativeGetExitCode(id)
-        assertEquals("Blocking waitpid should return exit code 42", 42, exitCode)
-        NativePTY.nativeClose(id)
+        try {
+            assertTrue(id >= 0)
+            val exitCode = NativePTY.nativeGetExitCode(id)
+            assertEquals("Blocking waitpid should return exit code 42", 42, exitCode)
+        } finally {
+            NativePTY.nativeClose(id)
+        }
     }
 
     @Test
@@ -413,13 +499,16 @@ class NativePTYTest {
     fun getExitCode_interactivePTY() {
         // PTY sessions may not track exit code the same way; just verify no crash
         val id = NativePTY.nativeStartPTY(24, 80, "/system/bin/sh", null, null)
-        assertTrue(id >= 0)
-        NativePTY.nativeWrite(id, "exit 3\n".toByteArray())
-        Thread.sleep(500)
-        while (readWithTimeout(id, 1000) != null) { /* drain */ }
-        // For PTY sessions exit code tracking may return -1 — just verify no crash
-        NativePTY.nativeGetExitCode(id)
-        NativePTY.nativeClose(id)
+        try {
+            assertTrue(id >= 0)
+            NativePTY.nativeWrite(id, "exit 3\n".toByteArray())
+            Thread.sleep(500)
+            while (readWithTimeout(id, 1000) != null) { /* drain */ }
+            // For PTY sessions exit code tracking may return -1 — just verify no crash
+            NativePTY.nativeGetExitCode(id)
+        } finally {
+            NativePTY.nativeClose(id)
+        }
     }
 
     // =================== nativeIsAlive: Local Exec ===================
@@ -427,19 +516,25 @@ class NativePTYTest {
     @Test
     fun isAlive_localExec_trueWhileRunning() {
         val id = NativePTY.nativeStartLocalExecSession("/system/bin/sh", "sleep 5", null, null)
-        assertTrue(id >= 0)
-        assertTrue("Local exec session should be alive while running", NativePTY.nativeIsAlive(id))
-        NativePTY.nativeClose(id)
+        try {
+            assertTrue(id >= 0)
+            assertTrue("Local exec session should be alive while running", NativePTY.nativeIsAlive(id))
+        } finally {
+            NativePTY.nativeClose(id)
+        }
     }
 
     @Test
     fun isAlive_localExec_falseAfterExit() {
         val id = NativePTY.nativeStartLocalExecSession("/system/bin/sh", "echo done", null, null)
-        assertTrue(id >= 0)
-        while (readWithTimeout(id, 2000) != null) { /* drain until EOF */ }
-        Thread.sleep(200)
-        assertFalse("Local exec session should not be alive after process exits", NativePTY.nativeIsAlive(id))
-        NativePTY.nativeClose(id)
+        try {
+            assertTrue(id >= 0)
+            while (readWithTimeout(id, 2000) != null) { /* drain until EOF */ }
+            Thread.sleep(200)
+            assertFalse("Local exec session should not be alive after process exits", NativePTY.nativeIsAlive(id))
+        } finally {
+            NativePTY.nativeClose(id)
+        }
     }
 
     // =================== nativeSendSignal: Local Exec ===================
@@ -447,21 +542,27 @@ class NativePTYTest {
     @Test
     fun sendSignal_localExec_sigterm() {
         val id = NativePTY.nativeStartLocalExecSession("/system/bin/sh", "sleep 60", null, null)
-        assertTrue(id >= 0)
-        NativePTY.nativeSendSignal(id, 15) // SIGTERM
-        Thread.sleep(500)
-        assertFalse("Process should not be alive after SIGTERM", NativePTY.nativeIsAlive(id))
-        NativePTY.nativeClose(id)
+        try {
+            assertTrue(id >= 0)
+            NativePTY.nativeSendSignal(id, 15) // SIGTERM
+            Thread.sleep(500)
+            assertFalse("Process should not be alive after SIGTERM", NativePTY.nativeIsAlive(id))
+        } finally {
+            NativePTY.nativeClose(id)
+        }
     }
 
     @Test
     fun sendSignal_localExec_sigkill() {
         val id = NativePTY.nativeStartLocalExecSession("/system/bin/sh", "sleep 60", null, null)
-        assertTrue(id >= 0)
-        NativePTY.nativeSendSignal(id, 9) // SIGKILL
-        Thread.sleep(500)
-        assertFalse("Process should not be alive after SIGKILL", NativePTY.nativeIsAlive(id))
-        NativePTY.nativeClose(id)
+        try {
+            assertTrue(id >= 0)
+            NativePTY.nativeSendSignal(id, 9) // SIGKILL
+            Thread.sleep(500)
+            assertFalse("Process should not be alive after SIGKILL", NativePTY.nativeIsAlive(id))
+        } finally {
+            NativePTY.nativeClose(id)
+        }
     }
 
     @Test
@@ -469,13 +570,16 @@ class NativePTYTest {
         // Verify process group kill reaches grandchild: sh -c 'sleep 60' spawns
         // sleep as a child of sh; SIGTERM via kill(-pid) should reach both.
         val id = NativePTY.nativeStartLocalExecSession("/system/bin/sh", "sh -c 'sleep 60'", null, null)
-        assertTrue(id >= 0)
-        Thread.sleep(300) // let child tree start
-        assertTrue("Process tree should be alive", NativePTY.nativeIsAlive(id))
-        NativePTY.nativeSendSignal(id, 15) // SIGTERM
-        Thread.sleep(500)
-        assertFalse("Process tree should exit after SIGTERM", NativePTY.nativeIsAlive(id))
-        NativePTY.nativeClose(id)
+        try {
+            assertTrue(id >= 0)
+            Thread.sleep(300) // let child tree start
+            assertTrue("Process tree should be alive", NativePTY.nativeIsAlive(id))
+            NativePTY.nativeSendSignal(id, 15) // SIGTERM
+            Thread.sleep(500)
+            assertFalse("Process tree should exit after SIGTERM", NativePTY.nativeIsAlive(id))
+        } finally {
+            NativePTY.nativeClose(id)
+        }
     }
 
     // =================== nativeStartPTY: Shell Parameter ===================
@@ -484,10 +588,13 @@ class NativePTYTest {
     fun startPTY_invalidShell_returnsNegative() {
         val id = NativePTY.nativeStartPTY(24, 80, "/nonexistent/shell", null, null)
         if (id >= 0) {
-            // Fork succeeded but exec failed; child should die immediately
-            Thread.sleep(500)
-            assertFalse("Session with invalid shell should not be alive", NativePTY.nativeIsAlive(id))
-            NativePTY.nativeClose(id)
+            try {
+                // Fork succeeded but exec failed; child should die immediately
+                Thread.sleep(500)
+                assertFalse("Session with invalid shell should not be alive", NativePTY.nativeIsAlive(id))
+            } finally {
+                NativePTY.nativeClose(id)
+            }
         }
         // id < 0 is also acceptable — fork+exec failure reported immediately
     }
@@ -495,20 +602,23 @@ class NativePTYTest {
     @Test
     fun startPTY_customShell_works() {
         val id = NativePTY.nativeStartPTY(24, 80, "/system/bin/sh", null, null)
-        assertTrue("PTY with explicit /system/bin/sh should start, got $id", id >= 0)
-        NativePTY.nativeWrite(id, "echo shell_test\n".toByteArray())
-        Thread.sleep(500)
-        val output = StringBuilder()
-        for (i in 0 until 5) {
-            val data = readWithTimeout(id, 1000) ?: break
-            output.append(String(data))
-            if (output.contains("shell_test")) break
+        try {
+            assertTrue("PTY with explicit /system/bin/sh should start, got $id", id >= 0)
+            NativePTY.nativeWrite(id, "echo shell_test\n".toByteArray())
+            Thread.sleep(500)
+            val output = StringBuilder()
+            for (i in 0 until 5) {
+                val data = readWithTimeout(id, 1000) ?: break
+                output.append(String(data))
+                if (output.contains("shell_test")) break
+            }
+            assertTrue(
+                "Output should contain 'shell_test', got: ${output.take(200)}",
+                output.contains("shell_test")
+            )
+        } finally {
+            NativePTY.nativeClose(id)
         }
-        assertTrue(
-            "Output should contain 'shell_test', got: ${output.take(200)}",
-            output.contains("shell_test")
-        )
-        NativePTY.nativeClose(id)
     }
 
     // =================== nativeResize: Exec Sessions ===================
@@ -516,10 +626,13 @@ class NativePTYTest {
     @Test
     fun resize_localExecSession_returnsNegative() {
         val id = NativePTY.nativeStartLocalExecSession("/system/bin/sh", "sleep 5", null, null)
-        assertTrue(id >= 0)
-        val result = NativePTY.nativeResize(id, 40, 120)
-        assertEquals("Resize on local exec session (no PTY fd) should return -1", -1, result)
-        NativePTY.nativeClose(id)
+        try {
+            assertTrue(id >= 0)
+            val result = NativePTY.nativeResize(id, 40, 120)
+            assertEquals("Resize on local exec session (no PTY fd) should return -1", -1, result)
+        } finally {
+            NativePTY.nativeClose(id)
+        }
     }
 
     // =================== nativeStartExecSession ===================
@@ -533,8 +646,8 @@ class NativePTYTest {
     @Test
     fun startExecSession_validSocket() {
         val id = NativePTY.nativeStartExecSession("@ftyd", "echo daemon_native", "/system/bin/sh", null, null)
-        if (id >= 0) {
-            // Daemon is running — read and verify output
+        Assume.assumeTrue("Daemon not running", id >= 0)
+        try {
             val output = StringBuilder()
             for (i in 0 until 5) {
                 val data = readWithTimeout(id, 2000) ?: break
@@ -545,9 +658,9 @@ class NativePTYTest {
                 "Output should contain 'daemon_native', got: ${output.take(200)}",
                 output.contains("daemon_native")
             )
+        } finally {
             NativePTY.nativeClose(id)
         }
-        // id < 0 means daemon is not running — acceptable, test is a no-op
     }
 
     // =================== Env Vars + Working Directory (Native) ===================
@@ -556,49 +669,58 @@ class NativePTYTest {
     fun startPTY_withEnvVars() {
         val envVars = arrayOf("FURY_NATIVE_TEST=native_env_val")
         val id = NativePTY.nativeStartPTY(24, 80, "/system/bin/sh", envVars, null)
-        assertTrue("Should get valid session id", id >= 0)
+        try {
+            assertTrue("Should get valid session id", id >= 0)
 
-        // Write command to echo the env var
-        val cmd = "echo \$FURY_NATIVE_TEST\n".toByteArray()
-        NativePTY.nativeWrite(id, cmd)
-        Thread.sleep(500)
+            // Write command to echo the env var
+            val cmd = "echo \$FURY_NATIVE_TEST\n".toByteArray()
+            NativePTY.nativeWrite(id, cmd)
+            Thread.sleep(500)
 
-        val data = readWithTimeout(id, 2000)
-        assertNotNull("Should read output", data)
-        val output = String(data!!)
-        assertTrue(
-            "Output should contain 'native_env_val', got: ${output.take(200)}",
-            output.contains("native_env_val")
-        )
-        NativePTY.nativeClose(id)
+            val data = readWithTimeout(id, 2000)
+            assertNotNull("Should read output", data)
+            val output = String(data!!)
+            assertTrue(
+                "Output should contain 'native_env_val', got: ${output.take(200)}",
+                output.contains("native_env_val")
+            )
+        } finally {
+            NativePTY.nativeClose(id)
+        }
     }
 
     @Test
     fun startPTY_withCwd() {
         val id = NativePTY.nativeStartPTY(24, 80, "/system/bin/sh", null, "/data/local/tmp")
-        assertTrue("Should get valid session id", id >= 0)
+        try {
+            assertTrue("Should get valid session id", id >= 0)
 
-        val cmd = "pwd\n".toByteArray()
-        NativePTY.nativeWrite(id, cmd)
-        Thread.sleep(500)
+            val cmd = "pwd\n".toByteArray()
+            NativePTY.nativeWrite(id, cmd)
+            Thread.sleep(500)
 
-        val data = readWithTimeout(id, 2000)
-        assertNotNull("Should read output", data)
-        val output = String(data!!)
-        assertTrue(
-            "Output should contain '/data/local/tmp', got: ${output.take(200)}",
-            output.contains("/data/local/tmp")
-        )
-        NativePTY.nativeClose(id)
+            val data = readWithTimeout(id, 2000)
+            assertNotNull("Should read output", data)
+            val output = String(data!!)
+            assertTrue(
+                "Output should contain '/data/local/tmp', got: ${output.take(200)}",
+                output.contains("/data/local/tmp")
+            )
+        } finally {
+            NativePTY.nativeClose(id)
+        }
     }
 
     @Test
     fun startPTY_withNullEnvAndCwd() {
         // Null env and cwd should work (backward compat)
         val id = NativePTY.nativeStartPTY(24, 80, "/system/bin/sh", null, null)
-        assertTrue("Should get valid session id with null env/cwd", id >= 0)
-        assertTrue("Session should be alive", NativePTY.nativeIsAlive(id))
-        NativePTY.nativeClose(id)
+        try {
+            assertTrue("Should get valid session id with null env/cwd", id >= 0)
+            assertTrue("Session should be alive", NativePTY.nativeIsAlive(id))
+        } finally {
+            NativePTY.nativeClose(id)
+        }
     }
 
     @Test
@@ -607,18 +729,21 @@ class NativePTYTest {
         val id = NativePTY.nativeStartLocalExecSession(
             "/system/bin/sh", "echo \$EXEC_NATIVE_VAR", envVars, null
         )
-        assertTrue("Should get valid session id", id >= 0)
+        try {
+            assertTrue("Should get valid session id", id >= 0)
 
-        val output = StringBuilder()
-        for (i in 0 until 10) {
-            val data = readWithTimeout(id, 2000) ?: break
-            output.append(String(data))
+            val output = StringBuilder()
+            for (i in 0 until 10) {
+                val data = readWithTimeout(id, 2000) ?: break
+                output.append(String(data))
+            }
+            assertTrue(
+                "Output should contain 'exec_val_123', got: ${output.take(200)}",
+                output.toString().contains("exec_val_123")
+            )
+        } finally {
+            NativePTY.nativeClose(id)
         }
-        assertTrue(
-            "Output should contain 'exec_val_123', got: ${output.take(200)}",
-            output.toString().contains("exec_val_123")
-        )
-        NativePTY.nativeClose(id)
     }
 
     @Test
@@ -626,18 +751,21 @@ class NativePTYTest {
         val id = NativePTY.nativeStartLocalExecSession(
             "/system/bin/sh", "pwd", null, "/data/local/tmp"
         )
-        assertTrue("Should get valid session id", id >= 0)
+        try {
+            assertTrue("Should get valid session id", id >= 0)
 
-        val output = StringBuilder()
-        for (i in 0 until 10) {
-            val data = readWithTimeout(id, 2000) ?: break
-            output.append(String(data))
+            val output = StringBuilder()
+            for (i in 0 until 10) {
+                val data = readWithTimeout(id, 2000) ?: break
+                output.append(String(data))
+            }
+            assertTrue(
+                "Output should contain '/data/local/tmp', got: ${output.take(200)}",
+                output.toString().contains("/data/local/tmp")
+            )
+        } finally {
+            NativePTY.nativeClose(id)
         }
-        assertTrue(
-            "Output should contain '/data/local/tmp', got: ${output.take(200)}",
-            output.toString().contains("/data/local/tmp")
-        )
-        NativePTY.nativeClose(id)
     }
 
     @Test
@@ -646,15 +774,18 @@ class NativePTYTest {
         val id = NativePTY.nativeStartLocalExecSession(
             "/system/bin/sh", "echo null_compat", null, null
         )
-        assertTrue("Should get valid session id", id >= 0)
+        try {
+            assertTrue("Should get valid session id", id >= 0)
 
-        val output = StringBuilder()
-        for (i in 0 until 10) {
-            val data = readWithTimeout(id, 2000) ?: break
-            output.append(String(data))
+            val output = StringBuilder()
+            for (i in 0 until 10) {
+                val data = readWithTimeout(id, 2000) ?: break
+                output.append(String(data))
+            }
+            assertTrue(output.toString().contains("null_compat"))
+        } finally {
+            NativePTY.nativeClose(id)
         }
-        assertTrue(output.toString().contains("null_compat"))
-        NativePTY.nativeClose(id)
     }
 
     // =================== Daemon Env Vars + Working Directory (Native) ===================
@@ -662,125 +793,137 @@ class NativePTYTest {
     @Test
     fun startDaemonSession_withEnvVars() {
         val id = NativePTY.nativeStartDaemonSession("@ftyd", 24, 80, "/system/bin/sh", arrayOf("FURY_DAEMON_ENV=daemon_env_val"), null)
-        if (id < 0) return // daemon not running
+        Assume.assumeTrue("Daemon not running", id >= 0)
+        try {
+            NativePTY.nativeWrite(id, "echo \$FURY_DAEMON_ENV\n".toByteArray())
+            Thread.sleep(1500)
 
-        NativePTY.nativeWrite(id, "echo \$FURY_DAEMON_ENV\n".toByteArray())
-        Thread.sleep(1500)
-
-        val output = StringBuilder()
-        for (i in 0 until 8) {
-            val data = readWithTimeout(id, 1000) ?: break
-            output.append(String(data))
-            if (output.contains("daemon_env_val")) break
+            val output = StringBuilder()
+            for (i in 0 until 8) {
+                val data = readWithTimeout(id, 1000) ?: break
+                output.append(String(data))
+                if (output.contains("daemon_env_val")) break
+            }
+            assertTrue(
+                "Output should contain 'daemon_env_val', got: ${output.take(200)}",
+                output.contains("daemon_env_val")
+            )
+        } finally {
+            NativePTY.nativeClose(id)
         }
-        assertTrue(
-            "Output should contain 'daemon_env_val', got: ${output.take(200)}",
-            output.contains("daemon_env_val")
-        )
-        NativePTY.nativeClose(id)
     }
 
     @Test
     fun startDaemonSession_withCwd() {
         val id = NativePTY.nativeStartDaemonSession("@ftyd", 24, 80, "/system/bin/sh", null, "/data/local/tmp")
-        if (id < 0) return // daemon not running
+        Assume.assumeTrue("Daemon not running", id >= 0)
+        try {
+            NativePTY.nativeWrite(id, "pwd\n".toByteArray())
+            Thread.sleep(1500)
 
-        NativePTY.nativeWrite(id, "pwd\n".toByteArray())
-        Thread.sleep(1500)
-
-        val output = StringBuilder()
-        for (i in 0 until 8) {
-            val data = readWithTimeout(id, 1000) ?: break
-            output.append(String(data))
-            if (output.contains("/data/local/tmp")) break
+            val output = StringBuilder()
+            for (i in 0 until 8) {
+                val data = readWithTimeout(id, 1000) ?: break
+                output.append(String(data))
+                if (output.contains("/data/local/tmp")) break
+            }
+            assertTrue(
+                "Output should contain '/data/local/tmp', got: ${output.take(200)}",
+                output.contains("/data/local/tmp")
+            )
+        } finally {
+            NativePTY.nativeClose(id)
         }
-        assertTrue(
-            "Output should contain '/data/local/tmp', got: ${output.take(200)}",
-            output.contains("/data/local/tmp")
-        )
-        NativePTY.nativeClose(id)
     }
 
     @Test
     fun startDaemonSession_withEnvAndCwd() {
         val id = NativePTY.nativeStartDaemonSession("@ftyd", 24, 80, "/system/bin/sh", arrayOf("FURY_DUAL=dual_val"), "/data/local/tmp")
-        if (id < 0) return // daemon not running
+        Assume.assumeTrue("Daemon not running", id >= 0)
+        try {
+            NativePTY.nativeWrite(id, "echo \$FURY_DUAL && pwd\n".toByteArray())
+            Thread.sleep(1500)
 
-        NativePTY.nativeWrite(id, "echo \$FURY_DUAL && pwd\n".toByteArray())
-        Thread.sleep(1500)
-
-        val output = StringBuilder()
-        for (i in 0 until 8) {
-            val data = readWithTimeout(id, 2000) ?: break
-            output.append(String(data))
-            if (output.contains("dual_val") && output.contains("/data/local/tmp")) break
+            val output = StringBuilder()
+            for (i in 0 until 8) {
+                val data = readWithTimeout(id, 2000) ?: break
+                output.append(String(data))
+                if (output.contains("dual_val") && output.contains("/data/local/tmp")) break
+            }
+            assertTrue(
+                "Output should contain 'dual_val', got: ${output.take(200)}",
+                output.contains("dual_val")
+            )
+            assertTrue(
+                "Output should contain '/data/local/tmp', got: ${output.take(200)}",
+                output.contains("/data/local/tmp")
+            )
+        } finally {
+            NativePTY.nativeClose(id)
         }
-        assertTrue(
-            "Output should contain 'dual_val', got: ${output.take(200)}",
-            output.contains("dual_val")
-        )
-        assertTrue(
-            "Output should contain '/data/local/tmp', got: ${output.take(200)}",
-            output.contains("/data/local/tmp")
-        )
-        NativePTY.nativeClose(id)
     }
 
     @Test
     fun startExecSession_withEnvVars() {
         val id = NativePTY.nativeStartExecSession("@ftyd", "echo \$EXEC_DAEMON_VAR", "/system/bin/sh", arrayOf("EXEC_DAEMON_VAR=daemon_exec_val"), null)
-        if (id < 0) return // daemon not running
-
-        val output = StringBuilder()
-        for (i in 0 until 10) {
-            val data = readWithTimeout(id, 2000) ?: break
-            output.append(String(data))
-            if (output.contains("daemon_exec_val")) break
+        Assume.assumeTrue("Daemon not running", id >= 0)
+        try {
+            val output = StringBuilder()
+            for (i in 0 until 10) {
+                val data = readWithTimeout(id, 2000) ?: break
+                output.append(String(data))
+                if (output.contains("daemon_exec_val")) break
+            }
+            assertTrue(
+                "Output should contain 'daemon_exec_val', got: ${output.take(200)}",
+                output.contains("daemon_exec_val")
+            )
+        } finally {
+            NativePTY.nativeClose(id)
         }
-        assertTrue(
-            "Output should contain 'daemon_exec_val', got: ${output.take(200)}",
-            output.contains("daemon_exec_val")
-        )
-        NativePTY.nativeClose(id)
     }
 
     @Test
     fun startExecSession_withCwd() {
         val id = NativePTY.nativeStartExecSession("@ftyd", "pwd", "/system/bin/sh", null, "/data/local/tmp")
-        if (id < 0) return // daemon not running
-
-        val output = StringBuilder()
-        for (i in 0 until 10) {
-            val data = readWithTimeout(id, 2000) ?: break
-            output.append(String(data))
-            if (output.contains("/data/local/tmp")) break
+        Assume.assumeTrue("Daemon not running", id >= 0)
+        try {
+            val output = StringBuilder()
+            for (i in 0 until 10) {
+                val data = readWithTimeout(id, 2000) ?: break
+                output.append(String(data))
+                if (output.contains("/data/local/tmp")) break
+            }
+            assertTrue(
+                "Output should contain '/data/local/tmp', got: ${output.take(200)}",
+                output.contains("/data/local/tmp")
+            )
+        } finally {
+            NativePTY.nativeClose(id)
         }
-        assertTrue(
-            "Output should contain '/data/local/tmp', got: ${output.take(200)}",
-            output.contains("/data/local/tmp")
-        )
-        NativePTY.nativeClose(id)
     }
 
     @Test
     fun startExecSession_withEnvAndCwd() {
         val id = NativePTY.nativeStartExecSession("@ftyd", "echo \$EXEC_DUAL && pwd", "/system/bin/sh", arrayOf("EXEC_DUAL=exec_dual_val"), "/data/local/tmp")
-        if (id < 0) return // daemon not running
-
-        val output = StringBuilder()
-        for (i in 0 until 10) {
-            val data = readWithTimeout(id, 2000) ?: break
-            output.append(String(data))
-            if (output.contains("exec_dual_val") && output.contains("/data/local/tmp")) break
+        Assume.assumeTrue("Daemon not running", id >= 0)
+        try {
+            val output = StringBuilder()
+            for (i in 0 until 10) {
+                val data = readWithTimeout(id, 2000) ?: break
+                output.append(String(data))
+                if (output.contains("exec_dual_val") && output.contains("/data/local/tmp")) break
+            }
+            assertTrue(
+                "Output should contain 'exec_dual_val', got: ${output.take(200)}",
+                output.contains("exec_dual_val")
+            )
+            assertTrue(
+                "Output should contain '/data/local/tmp', got: ${output.take(200)}",
+                output.contains("/data/local/tmp")
+            )
+        } finally {
+            NativePTY.nativeClose(id)
         }
-        assertTrue(
-            "Output should contain 'exec_dual_val', got: ${output.take(200)}",
-            output.contains("exec_dual_val")
-        )
-        assertTrue(
-            "Output should contain '/data/local/tmp', got: ${output.take(200)}",
-            output.contains("/data/local/tmp")
-        )
-        NativePTY.nativeClose(id)
     }
 }

@@ -199,7 +199,10 @@ static inline int proto_recv_data_ex(int fd, uint8_t *buf, int buf_size, int *ex
             }
             return 0;
         }
-        if (type == FTYD_CLOSE) return 0;
+        if (type == FTYD_CLOSE) {
+            if (len > 0 && proto_drain(fd, len) < 0) return -1;
+            return 0;
+        }
         if (proto_drain(fd, len) < 0) return -1;
     }
 }

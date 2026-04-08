@@ -7,7 +7,6 @@ package com.furyform.terminal
  */
 internal object NativePTY {
 
-    @Volatile
     private var loaded = false
 
     @Synchronized

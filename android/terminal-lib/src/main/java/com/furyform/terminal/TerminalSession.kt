@@ -184,10 +184,10 @@ class TerminalSession private constructor(
     fun write(data: ByteArray): Int {
         lock.read {
             if (closed) throw SessionClosedException()
+            val n = NativePTY.nativeWrite(id, data)
+            if (n < 0) throw WriteException(n, "Write failed (returned $n)")
+            return n
         }
-        val n = NativePTY.nativeWrite(id, data)
-        if (n < 0) throw WriteException(n, "Write failed (returned $n)")
-        return n
     }
 
     /**
@@ -230,14 +230,10 @@ class TerminalSession private constructor(
      */
     fun output(): Flow<ByteArray> = flow {
         while (coroutineContext.isActive && !closed) {
-            lock.read {
-                if (closed) return@flow
-                activeReaders.incrementAndGet()
-            }
             val data = try {
-                NativePTY.nativeRead(id)
-            } finally {
-                activeReaders.decrementAndGet()
+                read()
+            } catch (_: SessionClosedException) {
+                null
             }
             if (data != null && data.isNotEmpty()) {
                 emit(data)
@@ -355,6 +351,12 @@ class TerminalSession private constructor(
      *
      * Like [readAll], blocks until the process exits (EOF), but gives up after
      * [timeout] elapses. Useful for exec sessions where the process may hang.
+     *
+     * **Note:** The underlying [read] call is a blocking JNI operation that cannot
+     * be interrupted by coroutine cancellation. The timeout will take effect between
+     * read calls (when data arrives or EOF is reached), but cannot cancel a read
+     * that is blocked waiting for data. For processes that produce no output and
+     * don't exit, prefer [close] to force-unblock the read.
      *
      * @param timeout maximum time to wait for all output
      * @return all output concatenated as a UTF-8 string
