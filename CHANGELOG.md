@@ -19,7 +19,7 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 - Wrapped long function signatures to respect ~120 char line limit
 
 ### Fixed (Sample App)
-- `LaunchedEffect(selectedTab)` no longer fires on initial composition (was polluting exec output)
+- Tab switching no longer kills sessions — sessions persist across tabs, allowing Sessions tab to see running sessions
 - Removed unnecessary `withContext(Dispatchers.Main)` — `StateFlow.update()` is thread-safe
 - `parseEnvString` now filters empty keys (edge case with `"=VAL"` input)
 

@@ -148,17 +148,8 @@ fun TerminalScreen(viewModel: TerminalViewModel = viewModel()) {
     var selectedTab by remember { mutableIntStateOf(0) }
     val tabs = listOf("Interactive", "Exec", "Sessions")
 
-    // Stop the previous tab's session only on actual tab changes
-    var previousTab by remember { mutableIntStateOf(0) }
-    LaunchedEffect(selectedTab) {
-        if (selectedTab != previousTab) {
-            when (previousTab) {
-                0 -> viewModel.stopTerminal()
-                1 -> viewModel.stopExec()
-            }
-            previousTab = selectedTab
-        }
-    }
+    // Sessions persist across tab switches — users stop them explicitly via Stop buttons.
+    // This allows the Sessions tab to see running sessions created in other tabs.
 
     Column(
         modifier = Modifier
