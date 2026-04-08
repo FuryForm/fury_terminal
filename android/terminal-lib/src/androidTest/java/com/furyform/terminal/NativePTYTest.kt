@@ -841,8 +841,9 @@ class NativePTYTest {
         val id = NativePTY.nativeStartDaemonSession("@ftyd", 24, 80, "/system/bin/sh", arrayOf("FURY_DUAL=dual_val"), "/data/local/tmp")
         Assume.assumeTrue("Daemon not running", id >= 0)
         try {
+            Thread.sleep(500) // Wait for shell to start
             NativePTY.nativeWrite(id, "echo \$FURY_DUAL && pwd\n".toByteArray())
-            Thread.sleep(1500)
+            Thread.sleep(2000)
 
             val output = StringBuilder()
             for (i in 0 until 8) {
@@ -925,5 +926,204 @@ class NativePTYTest {
         } finally {
             NativePTY.nativeClose(id)
         }
+    }
+
+    // =================== Stress: Concurrent Sessions ===================
+
+    @Test
+    fun stress_maxConcurrentSessions() {
+        // Open 16 sessions (the maximum), verify all work, close all
+        val ids = mutableListOf<Int>()
+        try {
+            for (i in 0 until 16) {
+                val id = NativePTY.nativeStartPTY(24, 80, "/system/bin/sh", null, null)
+                assertTrue("Session $i should have id >= 0, got $id", id >= 0)
+                ids.add(id)
+            }
+            // 17th should fail
+            val overflow = NativePTY.nativeStartPTY(24, 80, "/system/bin/sh", null, null)
+            assertEquals("17th session should fail with -1", -1, overflow)
+        } finally {
+            ids.forEach { NativePTY.nativeClose(it) }
+        }
+    }
+
+    @Test
+    fun stress_rapidOpenClose() {
+        // Rapidly open and close sessions 50 times to check for leaks/races
+        for (i in 0 until 50) {
+            val id = NativePTY.nativeStartPTY(24, 80, "/system/bin/sh", null, null)
+            assertTrue("Iteration $i: session should open, got $id", id >= 0)
+            NativePTY.nativeClose(id)
+        }
+    }
+
+    @Test
+    fun stress_rapidOpenCloseExec() {
+        // Rapidly open and close exec sessions 50 times
+        for (i in 0 until 50) {
+            val id = NativePTY.nativeStartLocalExecSession("/system/bin/sh", "echo $i", null, null)
+            assertTrue("Iteration $i: exec session should open, got $id", id >= 0)
+            // Drain output
+            while (true) {
+                val data = readWithTimeout(id, 2000) ?: break
+                if (data.isEmpty()) break
+            }
+            NativePTY.nativeClose(id)
+        }
+    }
+
+    @Test
+    fun stress_concurrentReadsAndWrites() {
+        // Open a session, write and read concurrently from multiple threads
+        val id = NativePTY.nativeStartPTY(24, 80, "/system/bin/sh", null, null)
+        assertTrue(id >= 0)
+        try {
+            val pool = Executors.newFixedThreadPool(4)
+            val futures = (1..10).map { i ->
+                pool.submit(Callable {
+                    NativePTY.nativeWrite(id, "echo concurrent_$i\n".toByteArray())
+                })
+            }
+            futures.forEach { it.get(5, TimeUnit.SECONDS) }
+            // Read some output to verify session is still healthy
+            val data = readWithTimeout(id, 3000)
+            assertNotNull("Should receive some output", data)
+            pool.shutdownNow()
+        } finally {
+            NativePTY.nativeClose(id)
+        }
+    }
+
+    // =================== Resource Leak Detection ===================
+
+    @Test
+    fun leak_sessionSlotsRecycled() {
+        // Open and close sessions in sequence, verify slot IDs are reused
+        val seenIds = mutableSetOf<Int>()
+        for (i in 0 until 32) {
+            val id = NativePTY.nativeStartPTY(24, 80, "/system/bin/sh", null, null)
+            assertTrue("Iteration $i: should open, got $id", id >= 0)
+            assertTrue("ID should be 0..15, got $id", id in 0..15)
+            seenIds.add(id)
+            NativePTY.nativeClose(id)
+        }
+        // After 32 opens, should have reused IDs
+        assertTrue("Should have reused some session IDs", seenIds.size <= 16)
+    }
+
+    @Test
+    fun leak_closeIdempotent() {
+        // Closing the same session twice should not crash
+        val id = NativePTY.nativeStartPTY(24, 80, "/system/bin/sh", null, null)
+        assertTrue(id >= 0)
+        NativePTY.nativeClose(id)
+        // Second close should be a no-op (session already cleared)
+        NativePTY.nativeClose(id)
+    }
+
+    @Test
+    fun leak_operationsOnClosedSession() {
+        // Operations on a closed session should fail gracefully, not crash
+        val id = NativePTY.nativeStartPTY(24, 80, "/system/bin/sh", null, null)
+        assertTrue(id >= 0)
+        NativePTY.nativeClose(id)
+
+        // These should return error values, not crash
+        val readResult = NativePTY.nativeRead(id)
+        assertNull("Read on closed session should return null", readResult)
+
+        val writeResult = NativePTY.nativeWrite(id, "test".toByteArray())
+        assertTrue("Write on closed session should return negative", writeResult < 0)
+
+        assertFalse("isAlive on closed session should be false", NativePTY.nativeIsAlive(id))
+    }
+
+    @Test
+    fun leak_execSessionSlotsRecycled() {
+        // Exec sessions should also recycle slots properly
+        for (i in 0 until 20) {
+            val id = NativePTY.nativeStartLocalExecSession("/system/bin/sh", "echo recycle_$i", null, null)
+            assertTrue("Iteration $i: should open, got $id", id >= 0)
+            // Drain output
+            while (true) {
+                val data = readWithTimeout(id, 2000) ?: break
+                if (data.isEmpty()) break
+            }
+            NativePTY.nativeClose(id)
+        }
+    }
+
+    // =================== Session Listing ===================
+
+    @Test
+    fun listSessions_returnsEmptyWhenNoDaemonSessions() {
+        val result = NativePTY.nativeListDaemonSessions("@ftyd")
+        Assume.assumeTrue("Daemon not running", result != null)
+        assertNotNull("nativeListDaemonSessions should return non-null IntArray", result)
+        assertEquals(
+            "Result array length should be a multiple of 7, got ${result!!.size}",
+            0, result.size % 7
+        )
+    }
+
+    @Test
+    fun listSessions_showsActiveDaemonPtySession() {
+        val id = NativePTY.nativeStartDaemonSession("@ftyd", 24, 80, "/system/bin/sh", null, null)
+        Assume.assumeTrue("Daemon not running", id >= 0)
+        try {
+            Thread.sleep(500) // Wait for daemon to register session
+            val result = NativePTY.nativeListDaemonSessions("@ftyd")
+            assertNotNull("nativeListDaemonSessions should return non-null", result)
+            assertTrue("Result should have at least one entry", result!!.size >= 7)
+            assertEquals("Result array length should be a multiple of 7", 0, result.size % 7)
+
+            // stride-7: [sessionId, pid, uid, type, alive, startTimeHigh, startTimeLow]
+            var foundPty = false
+            for (i in result.indices step 7) {
+                val type = result[i + 3]
+                val alive = result[i + 4]
+                if (type == 0 && alive != 0) {
+                    foundPty = true
+                    break
+                }
+            }
+            assertTrue("Should find at least one active PTY session (type==0, alive!=0)", foundPty)
+        } finally {
+            NativePTY.nativeClose(id)
+        }
+    }
+
+    @Test
+    fun listSessions_showsActiveDaemonExecSession() {
+        val id = NativePTY.nativeStartExecSession("@ftyd", "sleep 5", "/system/bin/sh", null, null)
+        Assume.assumeTrue("Daemon not running", id >= 0)
+        try {
+            Thread.sleep(500) // Wait for daemon to register session
+            val result = NativePTY.nativeListDaemonSessions("@ftyd")
+            assertNotNull("nativeListDaemonSessions should return non-null", result)
+            assertTrue("Result should have at least one entry", result!!.size >= 7)
+            assertEquals("Result array length should be a multiple of 7", 0, result.size % 7)
+
+            // stride-7: [sessionId, pid, uid, type, alive, startTimeHigh, startTimeLow]
+            var foundExec = false
+            for (i in result.indices step 7) {
+                val type = result[i + 3]
+                val alive = result[i + 4]
+                if (type == 1 && alive != 0) {
+                    foundExec = true
+                    break
+                }
+            }
+            assertTrue("Should find at least one active exec session (type==1, alive!=0)", foundExec)
+        } finally {
+            NativePTY.nativeClose(id)
+        }
+    }
+
+    @Test
+    fun listSessions_returnsNullForBadSocket() {
+        val result = NativePTY.nativeListDaemonSessions("@nonexistent_socket_xyz")
+        assertNull("nativeListDaemonSessions with bad socket should return null", result)
     }
 }

@@ -5,7 +5,7 @@
  * Protocol matches the client in libterm.c:
  *   Message format: [type:uint8][length:uint32 BE][data:length]
  *   Types: DATA=0x01, RESIZE=0x02, SIGNAL=0x03, CLOSE=0x04,
- *          EXEC=0x05, EXIT_CODE=0x06
+ *          EXEC=0x05, EXIT_CODE=0x06, LIST=0x07
  *
  * Client flow (interactive):
  *   1. Connect to socket
@@ -33,6 +33,7 @@
 #include <sys/un.h>
 #include <sys/stat.h>
 #include <alloca.h>
+#include <time.h>
 
 #define DEFAULT_SOCKET_PATH "@ftyd"
 #define DEFAULT_SHELL       "/system/bin/sh"
@@ -230,6 +231,82 @@ static struct {
     } entries[MAX_EXEC_PIDS];
 } exec_table;
 
+/* =================== DAEMON SESSION TABLE =================== */
+
+/**
+ * Track all active daemon sessions (interactive PTY and exec) for the
+ * LIST command.  Entries are registered after fork() succeeds and
+ * unregistered when the handler function returns.
+ *
+ * Protected by g_sessions_mutex.  The `alive` field uses _Atomic so
+ * it can be read without the mutex when building the LIST response
+ * (though we currently hold the mutex there too for simplicity).
+ */
+#define MAX_DAEMON_SESSIONS 32
+
+typedef struct {
+    uint32_t     session_id;   /* monotonic, never reused */
+    pid_t        shell_pid;
+    uid_t        client_uid;
+    uint8_t      type;         /* 0 = interactive PTY, 1 = exec */
+    _Atomic int  alive;
+    time_t       start_time;
+    int          in_use;
+} daemon_session;
+
+static daemon_session g_sessions[MAX_DAEMON_SESSIONS];
+static pthread_mutex_t g_sessions_mutex = PTHREAD_MUTEX_INITIALIZER;
+static uint32_t g_next_session_id = 1;
+
+/* Register a new session in the table. Returns session_id or 0 on failure. */
+static uint32_t register_session(pid_t shell_pid, uid_t client_uid, uint8_t type) {
+    uint32_t id = 0;
+    pthread_mutex_lock(&g_sessions_mutex);
+    for (int i = 0; i < MAX_DAEMON_SESSIONS; i++) {
+        if (!g_sessions[i].in_use) {
+            g_sessions[i].session_id = g_next_session_id++;
+            if (g_next_session_id == 0) g_next_session_id = 1; /* skip sentinel */
+            g_sessions[i].shell_pid = shell_pid;
+            g_sessions[i].client_uid = client_uid;
+            g_sessions[i].type = type;
+            atomic_store(&g_sessions[i].alive, 1);
+            g_sessions[i].start_time = time(NULL);
+            g_sessions[i].in_use = 1;
+            id = g_sessions[i].session_id;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_sessions_mutex);
+    if (id == 0) {
+        LOGE("Session table full, cannot register pid %d\n", shell_pid);
+    }
+    return id;
+}
+
+/* Mark a session as no longer alive by shell PID. */
+static void mark_session_dead(pid_t shell_pid) {
+    pthread_mutex_lock(&g_sessions_mutex);
+    for (int i = 0; i < MAX_DAEMON_SESSIONS; i++) {
+        if (g_sessions[i].in_use && g_sessions[i].shell_pid == shell_pid) {
+            atomic_store(&g_sessions[i].alive, 0);
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_sessions_mutex);
+}
+
+/* Unregister a session by shell PID. */
+static void unregister_session(pid_t shell_pid) {
+    pthread_mutex_lock(&g_sessions_mutex);
+    for (int i = 0; i < MAX_DAEMON_SESSIONS; i++) {
+        if (g_sessions[i].in_use && g_sessions[i].shell_pid == shell_pid) {
+            g_sessions[i].in_use = 0;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_sessions_mutex);
+}
+
 /* Called right after fork() in handle_exec, before child can exit.
  * Uses CAS to avoid two threads claiming the same slot.
  * Returns slot index, or -1 if table full. */
@@ -287,9 +364,11 @@ static int exec_table_wait(int slot, pid_t pid, int *status) {
 
 /* =================== CLIENT SESSION =================== */
 
-/* Forward declaration for exec handler */
+/* Forward declarations */
 static void handle_exec(int client_fd, const char *shell_path,
-                        const uint8_t *cmd_buf, uint32_t cmd_len);
+                        const uint8_t *cmd_buf, uint32_t cmd_len,
+                        uid_t client_uid);
+static void handle_list(int client_fd);
 
 typedef struct {
     int client_fd;     /* socket to the app */
@@ -328,7 +407,7 @@ static void *pty_reader_thread(void *arg) {
  *   2. Spawn shell with those dimensions
  *   3. Relay DATA/RESIZE/SIGNAL/CLOSE until session ends
  */
-static void handle_client(int client_fd, const char *shell_path) {
+static void handle_client(int client_fd, const char *shell_path, uid_t client_uid) {
     LOGI("Client connected (fd=%d)\n", client_fd);
 
     /* Step 1: Wait for initial RESIZE to get terminal dimensions */
@@ -345,7 +424,11 @@ static void handle_client(int client_fd, const char *shell_path) {
     if (msg_type != FTYD_RESIZE || msg_len < 4) {
         if (msg_type == FTYD_EXEC && msg_len > 0) {
             /* EXEC mode: run command via pipes, not interactive shell */
-            handle_exec(client_fd, shell_path, msg_buf, msg_len);
+            handle_exec(client_fd, shell_path, msg_buf, msg_len, client_uid);
+            return;
+        }
+        if (msg_type == FTYD_LIST) {
+            handle_list(client_fd);
             return;
         }
         LOGE("Client fd=%d: expected RESIZE or EXEC as first message, got type=%d len=%u\n",
@@ -435,12 +518,16 @@ static void handle_client(int client_fd, const char *shell_path) {
 
     LOGI("Client fd=%d: shell started (pid=%d)\n", client_fd, shell_pid);
 
+    /* Register in daemon session table */
+    register_session(shell_pid, client_uid, 0); /* 0 = interactive PTY */
+
     /* Heap-allocate session to avoid use-after-free if reader thread outlives stack frame */
     client_session *session = (client_session *)malloc(sizeof(client_session));
     if (!session) {
         LOGE("Client fd=%d: malloc failed for session\n", client_fd);
         kill(shell_pid, SIGKILL);
         waitpid(shell_pid, NULL, 0);
+        unregister_session(shell_pid);
         close(master);
         proto_send(client_fd, FTYD_CLOSE, NULL, 0);
         close(client_fd);
@@ -455,6 +542,7 @@ static void handle_client(int client_fd, const char *shell_path) {
         LOGE("Client fd=%d: failed to create reader thread\n", client_fd);
         kill(shell_pid, SIGKILL);
         waitpid(shell_pid, NULL, 0);
+        unregister_session(shell_pid);
         close(master);
         proto_send(client_fd, FTYD_CLOSE, NULL, 0);
         close(client_fd);
@@ -528,9 +616,12 @@ cleanup:
      * Must join (not detach) so we don't free session while the thread still runs. */
     pthread_join(session->reader_tid, NULL);
 
+    mark_session_dead(shell_pid);
+
     close(client_fd);
     LOGI("Client fd=%d: session ended (shell pid=%d)\n", client_fd, shell_pid);
 
+    unregister_session(shell_pid);
     free(session);
 }
 
@@ -602,7 +693,8 @@ done:
  * No echo, no prompt, no line discipline — clean command output.
  */
 static void handle_exec(int client_fd, const char *shell_path,
-                        const uint8_t *cmd_buf, uint32_t cmd_len) {
+                        const uint8_t *cmd_buf, uint32_t cmd_len,
+                        uid_t client_uid) {
     const char *exec_shell = shell_path;
     const char *exec_cwd = NULL;
     const char **exec_env = NULL;
@@ -739,6 +831,9 @@ static void handle_exec(int client_fd, const char *shell_path,
     int exec_slot = exec_table_register(pid);
     pthread_sigmask(SIG_SETMASK, &old_set, NULL);
 
+    /* Register in daemon session table */
+    register_session(pid, client_uid, 1); /* 1 = exec */
+
     close(stdout_pipe[1]); /* we read from stdout_pipe[0] */
     close(stdin_pipe[0]);  /* we write to stdin_pipe[1] */
 
@@ -796,6 +891,8 @@ static void handle_exec(int client_fd, const char *shell_path,
 
     LOGI("Client fd=%d: EXEC finished (exit_code=%d)\n", client_fd, exit_code);
 
+    mark_session_dead(pid);
+
     /* Send EXIT_CODE message: 4-byte int32 BE */
     uint8_t ec[4];
     ec[0] = (uint8_t)((uint32_t)exit_code >> 24);
@@ -806,17 +903,103 @@ static void handle_exec(int client_fd, const char *shell_path,
 
     /* Send CLOSE */
     proto_send(client_fd, FTYD_CLOSE, NULL, 0);
+
+    unregister_session(pid);
+    close(client_fd);
+}
+
+/* =================== SESSION LISTING =================== */
+
+/**
+ * Handle a LIST request: serialize the daemon session table and send it back.
+ * Separate connection model: client connects → sends LIST → receives response → disconnects.
+ *
+ * Response payload: [count:uint16 BE][entries...]
+ * Each entry (22 bytes): session_id(4) + pid(4) + uid(4) + type(1) + alive(1) + start_time(8)
+ */
+static void handle_list(int client_fd) {
+    pthread_mutex_lock(&g_sessions_mutex);
+
+    uint16_t count = 0;
+    for (int i = 0; i < MAX_DAEMON_SESSIONS; i++) {
+        if (g_sessions[i].in_use) count++;
+    }
+
+    size_t payload_len = 2 + ((size_t)count * 22);
+    uint8_t *buf = (uint8_t *)malloc(payload_len);
+    if (!buf) {
+        pthread_mutex_unlock(&g_sessions_mutex);
+        LOGE("handle_list: malloc failed\n");
+        close(client_fd);
+        return;
+    }
+
+    /* Count: 2 bytes big-endian */
+    buf[0] = (uint8_t)(count >> 8);
+    buf[1] = (uint8_t)(count);
+
+    size_t off = 2;
+    for (int i = 0; i < MAX_DAEMON_SESSIONS; i++) {
+        if (!g_sessions[i].in_use) continue;
+        daemon_session *s = &g_sessions[i];
+
+        uint32_t sid = s->session_id;
+        uint32_t pid_val = (uint32_t)s->shell_pid;
+        uint32_t uid_val = (uint32_t)s->client_uid;
+        int alive_val = atomic_load(&s->alive);
+        uint64_t stime = (uint64_t)s->start_time;
+
+        /* session_id: 4 bytes BE */
+        buf[off++] = (uint8_t)(sid >> 24);
+        buf[off++] = (uint8_t)(sid >> 16);
+        buf[off++] = (uint8_t)(sid >> 8);
+        buf[off++] = (uint8_t)(sid);
+
+        /* pid: 4 bytes BE */
+        buf[off++] = (uint8_t)(pid_val >> 24);
+        buf[off++] = (uint8_t)(pid_val >> 16);
+        buf[off++] = (uint8_t)(pid_val >> 8);
+        buf[off++] = (uint8_t)(pid_val);
+
+        /* uid: 4 bytes BE */
+        buf[off++] = (uint8_t)(uid_val >> 24);
+        buf[off++] = (uint8_t)(uid_val >> 16);
+        buf[off++] = (uint8_t)(uid_val >> 8);
+        buf[off++] = (uint8_t)(uid_val);
+
+        /* type: 1 byte */
+        buf[off++] = s->type;
+
+        /* alive: 1 byte */
+        buf[off++] = alive_val ? 1 : 0;
+
+        /* start_time: 8 bytes BE */
+        buf[off++] = (uint8_t)(stime >> 56);
+        buf[off++] = (uint8_t)(stime >> 48);
+        buf[off++] = (uint8_t)(stime >> 40);
+        buf[off++] = (uint8_t)(stime >> 32);
+        buf[off++] = (uint8_t)(stime >> 24);
+        buf[off++] = (uint8_t)(stime >> 16);
+        buf[off++] = (uint8_t)(stime >> 8);
+        buf[off++] = (uint8_t)(stime);
+    }
+
+    pthread_mutex_unlock(&g_sessions_mutex);
+
+    proto_send(client_fd, FTYD_LIST, buf, (uint32_t)payload_len);
+    free(buf);
     close(client_fd);
 }
 
 typedef struct {
     int client_fd;
     char shell_path[256];
+    uid_t client_uid;
 } client_thread_args;
 
 static void *client_thread_fn(void *arg) {
     client_thread_args *a = (client_thread_args *)arg;
-    handle_client(a->client_fd, a->shell_path);
+    handle_client(a->client_fd, a->shell_path, a->client_uid);
     free(a);
     return NULL;
 }
@@ -1068,6 +1251,16 @@ int main(int argc, char *argv[]) {
             }
         }
 
+        /* Get client UID via SO_PEERCRED (needed for session tracking) */
+        uid_t client_uid = (uid_t)-1;
+        {
+            struct ucred cred;
+            socklen_t cred_len = sizeof(cred);
+            if (getsockopt(client_fd, SOL_SOCKET, SO_PEERCRED, &cred, &cred_len) == 0) {
+                client_uid = cred.uid;
+            }
+        }
+
         /* Auth check: verify client UID */
         if (auth_check_peer(client_fd) != 0) {
             close(client_fd);
@@ -1084,6 +1277,7 @@ int main(int argc, char *argv[]) {
         args->client_fd = client_fd;
         strncpy(args->shell_path, shell_path, sizeof(args->shell_path) - 1);
         args->shell_path[sizeof(args->shell_path) - 1] = '\0';
+        args->client_uid = client_uid;
 
         pthread_t tid;
         if (pthread_create(&tid, NULL, client_thread_fn, args) != 0) {

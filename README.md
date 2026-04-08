@@ -23,6 +23,7 @@ A native PTY (pseudo-terminal) library for Android, powered by pure C and the An
 - **Environment variables & working directory** — `env` and `cwd` parameters for all session types (local and daemon)
 - **Session lifecycle StateFlow** — observable `state: StateFlow<SessionState>` (`Running` → `Exited` → `Closed`)
 - **Suspend helpers** — `execAsync()`, `readText()`, `readAll(timeout: Duration)`
+- **Daemon session listing** — query active sessions on the daemon via `listSessions()` / `listSessionsAsync()`
 - Exit code capture for all session types (interactive PTY, exec, daemon)
 - **Process group signals** — `setsid()` + `kill(-pid)` ensures signals reach entire process tree
 - Signal delivery to exec sessions (SIGINT, SIGTERM, SIGKILL, etc.)
@@ -46,7 +47,7 @@ Add the dependency to your module's `build.gradle.kts`:
 
 ```kotlin
 dependencies {
-    implementation("com.github.FuryForm:fury_terminal:v0.6.0")
+    implementation("com.github.FuryForm:fury_terminal:v0.8.0")
 }
 ```
 
@@ -224,20 +225,37 @@ val text = session.readText()  // returns String? instead of ByteArray?
 val output = session.readAll(timeout = 5.seconds)
 ```
 
+### Daemon Session Listing
+
+Query active sessions on the daemon:
+
+```kotlin
+// List all active sessions on the daemon
+val sessions = TerminalSession.listSessions()  // default: "@ftyd"
+for (info in sessions) {
+    println("Session ${info.sessionId}: pid=${info.pid} type=${info.type} alive=${info.alive}")
+}
+
+// Async variant (suspend function)
+val sessions = TerminalSession.listSessionsAsync()
+```
+
+Each `DaemonSessionInfo` contains: `sessionId`, `pid`, `uid`, `type` ("pty" or "exec"), `alive`, `startTime`.
+
 ### Typed Exceptions
 
 ```kotlin
 try {
     val session = TerminalSession.create()
     session.write("hello\n")
-} catch (e: NativeException) {
-    // Native error (e.g., all 16 session slots in use)
 } catch (e: SessionClosedException) {
     // Session was already closed
 } catch (e: WriteException) {
     // Write to terminal failed
+} catch (e: DaemonConnectionException) {
+    // Daemon not running or connection refused
 } catch (e: NativeException) {
-    // Other native error
+    // Other native error (e.g., all 16 session slots in use)
 }
 ```
 
@@ -295,8 +313,19 @@ All messages: `[type:uint8][length:uint32 BE][data:length]` (max 1 MB per messag
 | CLOSE     | 0x04 | (none)                    | Both             |
 | EXEC      | 0x05 | Command string (UTF-8)    | Client → Daemon  |
 | EXIT_CODE | 0x06 | exit_code(int32 BE)       | Daemon → Client  |
+| LIST      | 0x07 | (none, response: session list) | Client → Daemon  |
 
 Allowed signals: SIGHUP, SIGINT, SIGQUIT, SIGKILL, SIGTERM, SIGCONT, SIGTSTP, SIGWINCH.
+
+#### Extended Payloads (v0.7.0+)
+
+**RESIZE** (initial message for interactive daemon sessions):
+- Basic: `[rows:BE16][cols:BE16]` (4 bytes) — daemon uses default shell
+- Extended: `[rows:BE16][cols:BE16][shell\0cwd\0KEY1=VAL1\0...]` — custom shell, cwd, env vars
+
+**EXEC** (exec sessions):
+- Basic: `shell\0command` (2 NUL-separated fields)
+- Extended: `shell\0command\0cwd\0KEY1=VAL1\0KEY2=VAL2\0...` — with cwd and env vars
 
 ## Root Daemon (ftyd)
 

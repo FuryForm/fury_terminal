@@ -86,4 +86,14 @@ internal object NativePTY {
      * Returns -1 if the session hasn't finished or exit code wasn't received.
      */
     external fun nativeGetExitCode(id: Int): Int
+
+    /**
+     * List active daemon sessions via FTYD_LIST protocol.
+     * Returns a flat IntArray with stride 7 per session:
+     *   [sessionId, pid, uid, type, alive, startTimeHigh, startTimeLow]
+     * Returns null on connection or protocol error.
+     *
+     * @param socketPath daemon socket path (e.g. "@ftyd")
+     */
+    external fun nativeListDaemonSessions(socketPath: String): IntArray?
 }

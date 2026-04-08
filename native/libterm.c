@@ -669,3 +669,87 @@ Java_com_furyform_terminal_NativePTY_nativeGetExitCode(JNIEnv *env, jobject thiz
     }
     return (jint)code;
 }
+
+/* =================== SESSION LISTING =================== */
+
+/**
+ * List active daemon sessions via the FTYD_LIST protocol message.
+ * Opens a temporary connection, sends LIST, reads the binary response,
+ * and returns a flat int array with stride 7 per session:
+ *   [sessionId, pid, uid, type, alive, startTimeHigh, startTimeLow]
+ * Returns NULL on connection or protocol error.
+ */
+JNIEXPORT jintArray JNICALL
+Java_com_furyform_terminal_NativePTY_nativeListDaemonSessions(
+        JNIEnv *env, jobject thiz, jstring jSocketPath) {
+    const char *path = (*env)->GetStringUTFChars(env, jSocketPath, NULL);
+    int fd = ftyd_connect(path);
+    (*env)->ReleaseStringUTFChars(env, jSocketPath, path);
+    if (fd < 0) return NULL;
+
+    /* Send LIST request (no payload) */
+    if (proto_send(fd, FTYD_LIST, NULL, 0) < 0) {
+        close(fd);
+        return NULL;
+    }
+
+    /* Read response */
+    uint8_t msg_type;
+    uint8_t msg_buf[8192]; /* 32 sessions * 22 bytes + 2 = 706 bytes max */
+    uint32_t msg_len;
+    if (proto_recv(fd, &msg_type, msg_buf, sizeof(msg_buf), &msg_len) < 0) {
+        close(fd);
+        return NULL;
+    }
+    close(fd);
+
+    if (msg_type != FTYD_LIST || msg_len < 2) return NULL;
+
+    /* Parse count */
+    uint16_t count = ((uint16_t)msg_buf[0] << 8) | (uint16_t)msg_buf[1];
+    if (msg_len < 2 + (uint32_t)count * 22) return NULL;
+
+    /* Build jintArray: 7 ints per session */
+    jint total = (jint)count * 7;
+    jintArray result = (*env)->NewIntArray(env, total);
+    if (!result) return NULL;
+
+    jint *arr = (*env)->GetIntArrayElements(env, result, NULL);
+    if (!arr) return NULL;
+
+    size_t off = 2;
+    for (int i = 0; i < count; i++) {
+        uint32_t sid = ((uint32_t)msg_buf[off] << 24) | ((uint32_t)msg_buf[off+1] << 16)
+                     | ((uint32_t)msg_buf[off+2] << 8) | (uint32_t)msg_buf[off+3];
+        off += 4;
+
+        uint32_t pid = ((uint32_t)msg_buf[off] << 24) | ((uint32_t)msg_buf[off+1] << 16)
+                     | ((uint32_t)msg_buf[off+2] << 8) | (uint32_t)msg_buf[off+3];
+        off += 4;
+
+        uint32_t uid = ((uint32_t)msg_buf[off] << 24) | ((uint32_t)msg_buf[off+1] << 16)
+                     | ((uint32_t)msg_buf[off+2] << 8) | (uint32_t)msg_buf[off+3];
+        off += 4;
+
+        uint8_t type = msg_buf[off++];
+        uint8_t alive = msg_buf[off++];
+
+        uint64_t stime = ((uint64_t)msg_buf[off] << 56) | ((uint64_t)msg_buf[off+1] << 48)
+                       | ((uint64_t)msg_buf[off+2] << 40) | ((uint64_t)msg_buf[off+3] << 32)
+                       | ((uint64_t)msg_buf[off+4] << 24) | ((uint64_t)msg_buf[off+5] << 16)
+                       | ((uint64_t)msg_buf[off+6] << 8)  | (uint64_t)msg_buf[off+7];
+        off += 8;
+
+        int base = i * 7;
+        arr[base]     = (jint)sid;
+        arr[base + 1] = (jint)pid;
+        arr[base + 2] = (jint)uid;
+        arr[base + 3] = (jint)type;
+        arr[base + 4] = (jint)alive;
+        arr[base + 5] = (jint)(stime >> 32);        /* high 32 bits */
+        arr[base + 6] = (jint)(stime & 0xFFFFFFFF); /* low 32 bits */
+    }
+
+    (*env)->ReleaseIntArrayElements(env, result, arr, 0);
+    return result;
+}

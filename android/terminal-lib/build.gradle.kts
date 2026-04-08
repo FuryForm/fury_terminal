@@ -68,7 +68,7 @@ afterEvaluate {
                 from(components["release"])
                 groupId = "com.github.FuryForm"
                 artifactId = "fury_terminal"
-                version = "0.7.2"
+                version = "0.8.0"
             }
         }
     }

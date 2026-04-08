@@ -26,15 +26,19 @@ jobs:
       - name: Make gradlew executable
         run: chmod +x android/gradlew
 
-      - name: Build library
+      - name: Build library (release)
         working-directory: android
         run: ./gradlew :terminal-lib:assembleRelease
+
+      - name: Build sample app
+        working-directory: android
+        run: ./gradlew :sample-app:assembleDebug
 
       - name: Run unit tests
         working-directory: android
         run: ./gradlew :sample-app:testDebugUnitTest
 
-      - name: Lint
+      - name: Lint library
         working-directory: android
         run: ./gradlew :terminal-lib:lintRelease
 
@@ -44,3 +48,10 @@ jobs:
         with:
           name: test-results
           path: android/sample-app/build/reports/tests/
+
+      - name: Upload lint results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lint-results
+          path: android/terminal-lib/build/reports/lint-results-release.html

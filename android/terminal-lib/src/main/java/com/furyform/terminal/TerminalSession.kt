@@ -34,6 +34,27 @@ data class ExecResult(
 }
 
 /**
+ * Information about an active session on the ftyd daemon.
+ *
+ * Retrieved via [TerminalSession.listSessions].
+ *
+ * @property sessionId server-assigned monotonic session ID (never reused)
+ * @property pid PID of the shell process on the device
+ * @property uid UID of the client that created this session
+ * @property type session type: "pty" for interactive, "exec" for command execution
+ * @property alive whether the shell process is still running
+ * @property startTime session start time as Unix epoch seconds
+ */
+data class DaemonSessionInfo(
+    val sessionId: Long,
+    val pid: Int,
+    val uid: Int,
+    val type: String,
+    val alive: Boolean,
+    val startTime: Long
+)
+
+/**
  * Lifecycle state of a [TerminalSession].
  *
  * Observable via [TerminalSession.state] as a [StateFlow].
@@ -244,6 +265,25 @@ class TerminalSession private constructor(
             }
         }
     }.flowOn(Dispatchers.IO)
+
+    /**
+     * A cold [Flow] that continuously reads terminal output as decoded UTF-8 strings.
+     *
+     * Convenience wrapper around [output] that decodes each chunk.
+     * The flow completes when the session is closed or the process exits.
+     * Runs on [Dispatchers.IO].
+     *
+     * ```kotlin
+     * session.outputText().collect { text ->
+     *     textView.append(text)
+     * }
+     * ```
+     */
+    fun outputText(): Flow<String> = flow {
+        output().collect { bytes ->
+            emit(String(bytes, Charsets.UTF_8))
+        }
+    }
 
     /**
      * Send a POSIX signal to the shell process.
@@ -570,5 +610,63 @@ class TerminalSession private constructor(
         ): ExecResult = withContext(Dispatchers.IO) {
             exec(command, socketPath, shell, env, cwd)
         }
+
+        // =================== Session Listing ===================
+
+        /**
+         * List active sessions on the ftyd daemon.
+         *
+         * Opens a temporary connection to the daemon, requests the session list,
+         * and returns immediately. Does not create a persistent session.
+         *
+         * ```kotlin
+         * val sessions = TerminalSession.listSessions()
+         * sessions.forEach { info ->
+         *     println("Session ${info.sessionId}: pid=${info.pid} type=${info.type} alive=${info.alive}")
+         * }
+         * ```
+         *
+         * @param socketPath daemon socket path (default: "@ftyd")
+         * @return list of active daemon sessions
+         * @throws DaemonConnectionException if the daemon is not running or refused the connection
+         */
+        @JvmStatic
+        @JvmOverloads
+        fun listSessions(socketPath: String = "@ftyd"): List<DaemonSessionInfo> {
+            NativePTY.ensureLoaded()
+            val raw = NativePTY.nativeListDaemonSessions(socketPath)
+                ?: throw DaemonConnectionException(
+                    socketPath,
+                    "Failed to list sessions from ftyd at $socketPath — is the daemon running?"
+                )
+
+            val stride = 7
+            val count = raw.size / stride
+            return (0 until count).map { i ->
+                val base = i * stride
+                val startTimeHigh = raw[base + 5].toLong() and 0xFFFFFFFFL
+                val startTimeLow = raw[base + 6].toLong() and 0xFFFFFFFFL
+                DaemonSessionInfo(
+                    sessionId = raw[base].toLong() and 0xFFFFFFFFL,
+                    pid = raw[base + 1],
+                    uid = raw[base + 2],
+                    type = if (raw[base + 3] == 0) "pty" else "exec",
+                    alive = raw[base + 4] != 0,
+                    startTime = (startTimeHigh shl 32) or startTimeLow
+                )
+            }
+        }
+
+        /**
+         * Lists active daemon sessions asynchronously.
+         *
+         * Suspend variant of [listSessions] that runs on [Dispatchers.IO].
+         *
+         * @param socketPath daemon socket path (default: "@ftyd")
+         * @return list of active daemon sessions
+         * @throws DaemonConnectionException if the daemon is not running or refused the connection
+         */
+        suspend fun listSessionsAsync(socketPath: String = "@ftyd"): List<DaemonSessionInfo> =
+            withContext(Dispatchers.IO) { listSessions(socketPath) }
     }
 }

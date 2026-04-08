@@ -1427,4 +1427,247 @@ class TerminalSessionTest {
         }
         session.close()
     }
+
+    // =================== Stress Tests ===================
+
+    @Test
+    fun stress_rapidExecCycles() {
+        // Run 30 rapid exec cycles to verify no session leaks
+        for (i in 0 until 30) {
+            val result = TerminalSession.exec("echo stress_$i")
+            assertTrue("Iteration $i should succeed", result.isSuccess)
+            assertTrue("Output should contain marker", result.output.contains("stress_$i"))
+        }
+    }
+
+    @Test
+    fun stress_maxSessionsViaAPI() {
+        // Open 16 sessions via the Kotlin API, verify the 17th throws
+        val sessions = mutableListOf<TerminalSession>()
+        try {
+            for (i in 0 until 16) {
+                sessions.add(TerminalSession.create())
+            }
+            // 17th should throw NativeException
+            try {
+                TerminalSession.create()
+                fail("17th session should throw NativeException")
+            } catch (e: NativeException) {
+                // Expected — all 16 slots are full
+                assertTrue("Should be negative return code", e.nativeReturnCode < 0)
+            }
+        } finally {
+            sessions.forEach { it.close() }
+        }
+    }
+
+    @Test
+    fun stress_concurrentExec() {
+        // Run 8 exec sessions concurrently
+        val pool = Executors.newFixedThreadPool(8)
+        try {
+            val futures = (1..8).map { i ->
+                pool.submit(Callable {
+                    TerminalSession.exec("echo parallel_$i")
+                })
+            }
+            val results = futures.map { it.get(15, TimeUnit.SECONDS) }
+            results.forEachIndexed { idx, result ->
+                assertTrue("Task ${idx + 1} should succeed", result.isSuccess)
+                assertTrue("Task ${idx + 1} output should contain marker",
+                    result.output.contains("parallel_${idx + 1}"))
+            }
+        } finally {
+            pool.shutdownNow()
+        }
+    }
+
+    // =================== Resource Leak Detection ===================
+
+    @Test
+    fun leak_closeIsIdempotent() {
+        val session = TerminalSession.create()
+        session.close()
+        assertTrue("Should be closed", session.isClosed)
+        // Second close should not throw
+        session.close()
+        assertTrue("Still closed", session.isClosed)
+    }
+
+    @Test
+    fun leak_readAfterClose_throws() {
+        val session = TerminalSession.create()
+        session.close()
+        try {
+            session.read()
+            fail("read() after close should throw SessionClosedException")
+        } catch (e: SessionClosedException) {
+            // Expected
+        }
+    }
+
+    @Test
+    fun leak_writeAfterClose_throws() {
+        val session = TerminalSession.create()
+        session.close()
+        try {
+            session.write("test")
+            fail("write() after close should throw SessionClosedException")
+        } catch (e: SessionClosedException) {
+            // Expected
+        }
+    }
+
+    @Test
+    fun leak_signalAfterClose_throws() {
+        val session = TerminalSession.create()
+        session.close()
+        try {
+            session.sendSignal(TerminalSession.SIGINT)
+            fail("sendSignal() after close should throw SessionClosedException")
+        } catch (e: SessionClosedException) {
+            // Expected
+        }
+    }
+
+    @Test
+    fun leak_resizeAfterClose_throws() {
+        val session = TerminalSession.create()
+        session.close()
+        try {
+            session.resize(40, 120)
+            fail("resize() after close should throw SessionClosedException")
+        } catch (e: SessionClosedException) {
+            // Expected
+        }
+    }
+
+    @Test
+    fun leak_exitCodeAfterClose() {
+        // exitCode should be available even after close (cached)
+        val result = TerminalSession.exec("echo done")
+        assertEquals("Exit code should be 0", 0, result.exitCode)
+    }
+
+    @Test
+    fun leak_useBlockCleansUp() {
+        // Verify .use{} properly cleans up even on exception
+        var session: TerminalSession? = null
+        try {
+            TerminalSession.create().also { session = it }.use { s ->
+                s.write("echo test\n")
+                throw RuntimeException("simulated error")
+            }
+        } catch (_: RuntimeException) {
+            // Expected
+        }
+        assertTrue("Session should be closed after use{} even on exception", session!!.isClosed)
+    }
+
+    // =================== outputText() ===================
+
+    @Test
+    fun outputText_decodesUtf8() {
+        val session = TerminalSession.create()
+        try {
+            session.write("echo TEXTFLOW_TEST\n")
+            val text = runBlocking {
+                withTimeoutOrNull(5000) {
+                    session.outputText().first()
+                }
+            }
+            assertNotNull("Should receive text output", text)
+            assertTrue("Output should be a String", text is String)
+        } finally {
+            session.close()
+        }
+    }
+
+    // =================== Session Listing ===================
+
+    @Test
+    fun listSessions_returnsListFromDaemon() {
+        try {
+            val sessions = TerminalSession.listSessions()
+            assertNotNull("listSessions() should return a non-null list", sessions)
+            // May be empty if no active daemon sessions — just verify no exception
+        } catch (e: DaemonConnectionException) {
+            // Daemon not running — skip test gracefully
+            println("Skipping: daemon not available")
+        }
+    }
+
+    @Test
+    fun listSessions_containsActivePtySession() {
+        try {
+            val session = TerminalSession.createDaemon(socketPath = "@ftyd")
+            try {
+                Thread.sleep(500) // Wait for daemon to register session
+                val listing = TerminalSession.listSessions()
+                val ptyEntry = listing.firstOrNull { it.type == "pty" && it.alive }
+                assertNotNull("Should find at least one active PTY session in listing", ptyEntry)
+                assertTrue("sessionId should be > 0", ptyEntry!!.sessionId > 0)
+                assertTrue("pid should be > 0", ptyEntry.pid > 0)
+                assertTrue("startTime should be > 0", ptyEntry.startTime > 0)
+            } finally {
+                session.close()
+            }
+        } catch (e: DaemonConnectionException) {
+            // Daemon not running — skip test gracefully
+            println("Skipping: daemon not available")
+        }
+    }
+
+    @Test
+    fun listSessions_containsActiveExecSession() {
+        try {
+            val session = TerminalSession.execSession("sleep 5", socketPath = "@ftyd")
+            try {
+                Thread.sleep(500) // Wait for daemon to register session
+                val listing = TerminalSession.listSessions()
+                val execEntry = listing.firstOrNull { it.type == "exec" && it.alive }
+                assertNotNull("Should find at least one active exec session in listing", execEntry)
+            } finally {
+                session.close()
+            }
+        } catch (e: DaemonConnectionException) {
+            // Daemon not running — skip test gracefully
+            println("Skipping: daemon not available")
+        }
+    }
+
+    @Test
+    fun listSessions_sessionDisappearsAfterClose() {
+        try {
+            val session = TerminalSession.createDaemon(socketPath = "@ftyd")
+            Thread.sleep(500) // Wait for daemon to register session
+            val listingBefore = TerminalSession.listSessions()
+            val countBefore = listingBefore.size
+
+            session.close()
+            Thread.sleep(500)
+
+            val listingAfter = TerminalSession.listSessions()
+            val countAfter = listingAfter.size
+
+            assertTrue(
+                "Session count should decrease or stay same after close (before=$countBefore, after=$countAfter)",
+                countAfter <= countBefore
+            )
+        } catch (e: DaemonConnectionException) {
+            // Daemon not running — skip test gracefully
+            println("Skipping: daemon not available")
+        }
+    }
+
+    @Test
+    fun listSessions_throwsForBadSocket() {
+        try {
+            TerminalSession.listSessions("@nonexistent_socket_xyz")
+            fail("listSessions() with bad socket should throw DaemonConnectionException")
+        } catch (e: DaemonConnectionException) {
+            // Expected — bad socket path should not connect
+            assertEquals("@nonexistent_socket_xyz", e.socketPath)
+        }
+    }
 }

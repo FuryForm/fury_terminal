@@ -1,6 +1,6 @@
 id=fury-terminal-daemon
 name=FuryTerminal Daemon
-version=v0.1.0
-versionCode=1
+version=v0.8.0
+versionCode=9
 author=FuryForm
-description=Root PTY daemon for FuryTerminal. Spawns root shells for the FuryTerminal app.
+description=Root PTY daemon (ftyd) for FuryTerminal. Spawns root shells via abstract Unix socket with optional UID authentication.

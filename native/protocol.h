@@ -22,6 +22,7 @@
 #define FTYD_CLOSE     0x04
 #define FTYD_EXEC      0x05  /* Client→Server: execute command (payload = command string) */
 #define FTYD_EXIT_CODE 0x06  /* Server→Client: process exited (payload = 4-byte int32 BE exit code) */
+#define FTYD_LIST      0x07  /* Client→Server: list active sessions (no payload; response = session table) */
 
 /*
  * Extended payload formats:
