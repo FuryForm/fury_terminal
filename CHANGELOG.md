@@ -3,6 +3,26 @@
 All notable changes to FuryTerminal are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.8.1] - 2026-04-08
+
+### Added (Sample App)
+- **3-tab layout** — Interactive, Exec, and Sessions tabs
+- **Env/CWD inputs** — environment variables and working directory fields on Interactive and Exec tabs
+- **Session state display** — real-time `SessionState` badge (Running/Exited/Closed) on Interactive tab
+- **Sessions tab** — query and display active daemon sessions with session ID, type, PID, UID, start time
+- Uses `outputText()` for interactive terminal output (text-based Flow)
+
+### Changed (Sample App)
+- Extracted `MonospaceTextField` and `EnvCwdInputs` composables (eliminated ~150 lines of duplication)
+- Moved signal button lists to file-level constants (avoids recomposition allocations)
+- Added section separators to both ViewModel and Screen files
+- Wrapped long function signatures to respect ~120 char line limit
+
+### Fixed (Sample App)
+- `LaunchedEffect(selectedTab)` no longer fires on initial composition (was polluting exec output)
+- Removed unnecessary `withContext(Dispatchers.Main)` — `StateFlow.update()` is thread-safe
+- `parseEnvString` now filters empty keys (edge case with `"=VAL"` input)
+
 ## [0.8.0] - 2026-04-08
 
 ### Added
